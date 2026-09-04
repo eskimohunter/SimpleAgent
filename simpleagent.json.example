@@ -27,6 +27,8 @@
   },
   "session": {
     "max_messages": 200,
-    "max_tool_calls_per_turn": 25
+    "max_tool_calls_per_turn": 25,
+    "project_instructions": true,
+    "system_prompt_file": ""
   }
 }

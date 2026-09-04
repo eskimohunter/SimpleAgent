@@ -92,6 +92,20 @@ timestamped. Contents of files are not logged.
   apply at the tool level (see config `files` and `shell.max_output_bytes`).
 - Context is bounded (message window + per-turn tool-call limit) so a
   runaway loop cannot spin forever.
+- **Project instructions are advisory.** When `session.project_instructions`
+  is enabled (default) the harness appends `<root>/AGENTS.md` (falling back
+  to `<root>/CLAUDE.md`) to the system prompt; `session.system_prompt_file`
+  replaces that with one explicit file. This text is untrusted input read
+  at startup, exactly like the model's own output: it is *advice*, injected
+  under a header that labels it project-controlled, and all enforcement
+  (path containment, denylist, approval gate, audit) lives in code that
+  project files cannot touch. Files are capped at 64 KiB, empty files
+  inject nothing, discovered files skip symlinks, and an unreadable or
+  oversized explicit file aborts startup rather than silently changing the
+  prompt. The audit log records which instruction files were injected (name
+  and size only — not their content, which is sent to the model endpoint
+  as part of the system prompt, so instruction files must not contain
+  secrets).
 
 ## Residual risks (by design)
 

@@ -76,9 +76,19 @@ type ApprovalsConfig struct {
 // SessionConfig bounds one interactive session: MaxMessages is how much
 // history is kept in the model context (oldest messages are trimmed away)
 // and MaxToolCallsPerTurn stops an agent that never stops calling tools.
+//
+// The remaining fields customize the system prompt. ProjectInstructions
+// (default true) makes startup auto-load the project's own instruction file
+// (<root>/AGENTS.md, falling back to <root>/CLAUDE.md) and append it to the
+// system prompt. SystemPromptFile, when set, loads that file instead of the
+// auto-discovery (paths relative to the project root). Loaded files are
+// capped at 64 KiB; content is advisory text for the model and can never
+// weaken the code-enforced sandbox and approval rules.
 type SessionConfig struct {
-	MaxMessages         int `json:"max_messages"`
-	MaxToolCallsPerTurn int `json:"max_tool_calls_per_turn"`
+	MaxMessages         int    `json:"max_messages"`
+	MaxToolCallsPerTurn int    `json:"max_tool_calls_per_turn"`
+	ProjectInstructions bool   `json:"project_instructions"`
+	SystemPromptFile    string `json:"system_prompt_file"`
 }
 
 // Config is the fully merged configuration handed to the rest of the
@@ -134,6 +144,7 @@ func Defaults() Config {
 		Session: SessionConfig{
 			MaxMessages:         200,
 			MaxToolCallsPerTurn: 25,
+			ProjectInstructions: true,
 		},
 	}
 }

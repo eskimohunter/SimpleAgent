@@ -175,6 +175,38 @@ func TestFlagOverridesFileRoot(t *testing.T) {
 	}
 }
 
+func TestSessionInstructionConfig(t *testing.T) {
+	d := Defaults()
+	if !d.Session.ProjectInstructions {
+		t.Fatal("project_instructions must default to true")
+	}
+	if d.Session.SystemPromptFile != "" {
+		t.Fatalf("system_prompt_file must default to empty, got %q", d.Session.SystemPromptFile)
+	}
+	dir := t.TempDir()
+	cfg := `{
+		"model": {"base_url": "http://h/v1", "model": "m"},
+		"session": {"project_instructions": false, "system_prompt_file": "custom.md"}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "simpleagent.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(dir, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Session.ProjectInstructions {
+		t.Fatal("project_instructions=false must override the default")
+	}
+	if c.Session.SystemPromptFile != "custom.md" {
+		t.Fatalf("system_prompt_file not applied: %q", c.Session.SystemPromptFile)
+	}
+	// File overlay must not disturb the untouched defaults either way.
+	if c.Session.MaxMessages != 200 {
+		t.Fatal("defaults must survive file overlay")
+	}
+}
+
 func TestDenylistDefaultsEmptyAndFileLoaded(t *testing.T) {
 	if d := Defaults().Approvals.Denylist; d != nil && len(d) != 0 {
 		t.Fatalf("denylist must default to empty, got %v", d)

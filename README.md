@@ -130,7 +130,9 @@ omitted.
   },
   "session": {
     "max_messages": 200,
-    "max_tool_calls_per_turn": 25
+    "max_tool_calls_per_turn": 25,
+    "project_instructions": true,
+    "system_prompt_file": ""
   }
 }
 ```
@@ -148,6 +150,23 @@ defaults ship an empty denylist; the entries above are recommendations for
 keeping project files on the machine — the harness itself has no network
 path except the configured model endpoint, and these commands would be the
 way an approved shell command reaches out to the internet.
+
+The `session` keys customize the agent's system prompt. By default the
+harness appends the project's own instruction file — `<root>/AGENTS.md`, or
+`<root>/CLAUDE.md` when AGENTS.md is absent — to the built-in rules, so a
+project already carrying those files (this repo has one) steers the agent
+the same way other coding agents are steered. Set `project_instructions` to
+`false` to disable that. For a single custom file instead, set
+`system_prompt_file` to its path (relative to the project root); when set it
+replaces the auto-discovery. Loaded files are capped at 64 KiB (larger
+discovered files are skipped with a warning; an oversized or unreadable
+explicit file aborts startup) and are read once at launch — edit and
+restart. Everything in them is advisory text for the model, injected under
+a header that says so: it can never weaken the code-enforced sandbox,
+denylist, or approval gates. Because the content travels as part of the
+system prompt with every model request this session, keep secrets out of
+`AGENTS.md`/`CLAUDE.md` — only the file name and size are audited, never the
+content.
 
 Environment overrides: `AGENT_BASE_URL`, `AGENT_MODEL`, `AGENT_TEMPERATURE`.
 The API key is read from the env var named by `api_key_env` — that field must

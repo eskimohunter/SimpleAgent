@@ -72,9 +72,20 @@ func testEngine(t *testing.T, brain mock.Brain, deny bool) (*Engine, *fakeUI, *s
 	t.Cleanup(func() { _ = auditLog.Close() })
 	ui := &fakeUI{denyAll: deny}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
-	eng := New(cfg, client, sbx, allow, auditLog, ui, "test-session")
+	eng := mustNew(t, cfg, client, sbx, allow, auditLog, ui, "test-session")
 	eng.MaxToolCallsPerTurn = 10
 	return eng, ui, sbx
+}
+
+// mustNew builds an engine like New, failing the test on startup errors
+// (e.g. an unreadable explicit system_prompt_file).
+func mustNew(t *testing.T, cfg config.Config, client *model.Client, sbx *sandbox.Sandbox, allow *approvals.Manager, auditLog *audit.Audit, ui UI, sessionID string) *Engine {
+	t.Helper()
+	eng, err := New(cfg, client, sbx, allow, auditLog, ui, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return eng
 }
 
 func TestEndToEndTools(t *testing.T) {
@@ -200,7 +211,7 @@ func TestAutoAllowFromAllowlistSkipsPrompt(t *testing.T) {
 	defer auditLog.Close()
 	ui := &fakeUI{}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
-	eng := New(cfg, client, sbx, allow, auditLog, ui, "s")
+	eng := mustNew(t, cfg, client, sbx, allow, auditLog, ui, "s")
 	eng.MaxToolCallsPerTurn = 3
 	sum, err := eng.RunTurn(context.Background(), "check git status")
 	if err != nil {
@@ -247,7 +258,7 @@ func TestRollbackOnModelFailure(t *testing.T) {
 	defer auditLog.Close()
 	ui := &fakeUI{}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 2*time.Second)
-	eng := New(cfg, client, sbx, allow, auditLog, ui, "s")
+	eng := mustNew(t, cfg, client, sbx, allow, auditLog, ui, "s")
 	before := len(eng.History())
 	if _, err := eng.RunTurn(context.Background(), "hello"); err == nil {
 		t.Fatal("expected error from dead model")
@@ -294,7 +305,7 @@ func TestDenylistHardBlock(t *testing.T) {
 	defer auditLog.Close()
 	ui := &fakeUI{}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
-	eng := New(cfg, client, sbx, allow, auditLog, ui, "s")
+	eng := mustNew(t, cfg, client, sbx, allow, auditLog, ui, "s")
 	eng.MaxToolCallsPerTurn = 3
 	sum, err := eng.RunTurn(context.Background(), "fetch something")
 	if err != nil {
@@ -342,7 +353,7 @@ func TestDenylistCaseInsensitiveMatch(t *testing.T) {
 	defer auditLog.Close()
 	ui := &fakeUI{}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
-	eng := New(cfg, client, sbx, allow, auditLog, ui, "s")
+	eng := mustNew(t, cfg, client, sbx, allow, auditLog, ui, "s")
 	eng.MaxToolCallsPerTurn = 3
 	sum, err := eng.RunTurn(context.Background(), "run uppercase curl")
 	if err != nil {
@@ -350,6 +361,291 @@ func TestDenylistCaseInsensitiveMatch(t *testing.T) {
 	}
 	if sum.DeniedCommands != 1 || len(ui.approvals) != 0 {
 		t.Fatalf("uppercase variant must be hard-blocked too: %+v %v", sum, ui.approvals)
+	}
+}
+
+// buildEngine creates the full engine wiring (mock server, approvals, audit,
+// fake UI) against a fresh temp project root, runs cfgFn to customize the
+// config and/or write files into cfg.Root, and returns the engine or the
+// New error. Success tests must check the error themselves.
+func buildEngine(t *testing.T, brain mock.Brain, cfgFn func(*config.Config)) (*Engine, *fakeUI, error) {
+	t.Helper()
+	dir := t.TempDir()
+	root, err := sandbox.NewRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := mock.New(brain)
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	cfg := config.Defaults()
+	cfg.Root = dir
+	cfg.Model.Model = "mock"
+	cfg.Model.BaseURL = "http://" + srv.Addr() + "/v1"
+	if cfgFn != nil {
+		cfgFn(&cfg)
+	}
+	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
+	allow, err := approvals.New("", false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditLog, err := audit.New(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = auditLog.Close() })
+	ui := &fakeUI{}
+	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
+	eng, err := New(cfg, client, sbx, allow, auditLog, ui, "s")
+	return eng, ui, err
+}
+
+// captureSystem runs one turn with a brain that records the system message
+// (messages[0]) on its first call and then answers, ending the turn.
+func captureSystem(t *testing.T, eng *Engine) string {
+	t.Helper()
+	var got string
+	brain := func(msgs []model.Message) model.Reply {
+		if got == "" && len(msgs) > 0 {
+			got = stringOf(msgs[0])
+		}
+		return model.Reply{Content: "ok."}
+	}
+	// Replace the engine's client with one pointed at a fresh mock server
+	// wired to brain.
+	srv := mock.New(brain)
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	eng.Client = model.NewClient("http://"+srv.Addr()+"/v1", "", false, 30*time.Second)
+	if _, err := eng.RunTurn(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if got == "" {
+		t.Fatal("brain never saw a system message")
+	}
+	return got
+}
+
+func TestSystemPromptFromAGENTS(t *testing.T) {
+	const marker = "PROJECT-RULES-AGENTS-MARKER"
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		if err := os.WriteFile(filepath.Join(cfg.Root, "AGENTS.md"), []byte("# rules\n"+marker+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := captureSystem(t, eng)
+	if !strings.Contains(sys, "You are SimpleAgent") {
+		t.Fatalf("default rules missing from system prompt")
+	}
+	if !strings.Contains(sys, marker) {
+		t.Fatalf("AGENTS.md content missing from system prompt")
+	}
+	if strings.Index(sys, "You are SimpleAgent") > strings.Index(sys, marker) {
+		t.Fatal("built-in rules must precede project instructions")
+	}
+}
+
+func TestSystemPromptPrefersAGENTSOverCLAUDE(t *testing.T) {
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		root := cfg.Root
+		if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("AGENTS-MARKER\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("CLAUDE-MARKER\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := captureSystem(t, eng)
+	if !strings.Contains(sys, "AGENTS-MARKER") {
+		t.Fatal("AGENTS.md must be preferred when both files exist")
+	}
+	if strings.Contains(sys, "CLAUDE-MARKER") {
+		t.Fatal("CLAUDE.md must not be loaded when AGENTS.md exists")
+	}
+}
+
+func TestSystemPromptFallsBackToCLAUDE(t *testing.T) {
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		if err := os.WriteFile(filepath.Join(cfg.Root, "CLAUDE.md"), []byte("CLAUDE-ONLY-MARKER\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := captureSystem(t, eng)
+	if !strings.Contains(sys, "CLAUDE-ONLY-MARKER") {
+		t.Fatal("CLAUDE.md fallback must be loaded when AGENTS.md is absent")
+	}
+}
+
+func TestSystemPromptDiscoveryOptOut(t *testing.T) {
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		cfg.Session.ProjectInstructions = false
+		if err := os.WriteFile(filepath.Join(cfg.Root, "AGENTS.md"), []byte("SHOULD-NOT-APPEAR\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sys := captureSystem(t, eng); strings.Contains(sys, "SHOULD-NOT-APPEAR") {
+		t.Fatal("project_instructions=false must disable auto-discovery")
+	}
+}
+
+func TestSystemPromptExplicitFile(t *testing.T) {
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		// An AGENTS.md also exists: the explicit file must win over it.
+		root := cfg.Root
+		if err := os.MkdirAll(filepath.Join(root, "notes"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "notes", "prompt.md"), []byte("EXPLICIT-MARKER\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("AGENTS-MARKER\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Session.SystemPromptFile = "notes/prompt.md"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := captureSystem(t, eng)
+	if !strings.Contains(sys, "EXPLICIT-MARKER") {
+		t.Fatalf("explicit system_prompt_file (relative to root) must be loaded: %q", sys)
+	}
+	if strings.Contains(sys, "AGENTS-MARKER") {
+		t.Fatal("explicit system_prompt_file must disable auto-discovery")
+	}
+}
+
+func TestSystemPromptExplicitFileErrors(t *testing.T) {
+	// Missing file: startup must fail, not silently fall back.
+	if _, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		cfg.Session.SystemPromptFile = "does-not-exist.md"
+	}); err == nil {
+		t.Fatal("missing explicit system_prompt_file must error")
+	}
+	// Over the 64 KiB cap: startup must fail too.
+	if _, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		cfg.Session.SystemPromptFile = "huge.md"
+		if err := os.WriteFile(filepath.Join(cfg.Root, "huge.md"), []byte(strings.Repeat("x", 64*1024+1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}); err == nil {
+		t.Fatal("oversized explicit system_prompt_file must error")
+	}
+}
+
+func TestSystemPromptDiscoverySkipsSymlink(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "rules.md"), []byte("OUTSIDE-MARKER\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		if err := os.Symlink(filepath.Join(outside, "rules.md"), filepath.Join(cfg.Root, "AGENTS.md")); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sys := captureSystem(t, eng); strings.Contains(sys, "OUTSIDE-MARKER") {
+		t.Fatal("symlinked AGENTS.md must be skipped during discovery")
+	}
+}
+
+func TestSystemPromptDiscoverySkipsOversized(t *testing.T) {
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		if err := os.WriteFile(filepath.Join(cfg.Root, "AGENTS.md"), []byte(strings.Repeat("x", 64*1024+1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := captureSystem(t, eng)
+	if strings.Contains(sys, strings.Repeat("x", 100)) {
+		t.Fatal("oversized AGENTS.md must be skipped during discovery")
+	}
+}
+
+func TestSystemPromptEmptyFileInjectsNothing(t *testing.T) {
+	// A whitespace-only discovered AGENTS.md must not produce a bare empty
+	// section...
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		if err := os.WriteFile(filepath.Join(cfg.Root, "AGENTS.md"), []byte("   \n  \n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sys := captureSystem(t, eng); strings.Contains(sys, "Project instructions") {
+		t.Fatalf("empty discovered file must inject no section: %q", sys)
+	}
+	// ...and an explicit empty system_prompt_file must neither error nor
+	// append anything.
+	eng2, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		if err := os.WriteFile(filepath.Join(cfg.Root, "empty.md"), []byte{}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Session.SystemPromptFile = "empty.md"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sys := captureSystem(t, eng2); strings.Contains(sys, "Project instructions") {
+		t.Fatalf("explicit empty file must inject no section: %q", sys)
+	}
+}
+
+func TestSystemPromptUnreadableAGENTSFallsBackToCLAUDE(t *testing.T) {
+	// A discovered AGENTS.md that exists but cannot be read (permissions)
+	// must be skipped with a warning, not silently, and CLAUDE.md must then
+	// be consulted - the fallback must not be masked by a broken file.
+	eng, _, err := buildEngine(t, nil, func(cfg *config.Config) {
+		root := cfg.Root
+		agents := filepath.Join(root, "AGENTS.md")
+		if err := os.WriteFile(agents, []byte("UNREADABLE-MARKER\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(agents, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		// Some filesystems (and Windows) do not enforce read permissions for
+		// the owner; the fallback behavior is only observable when reading
+		// really fails.
+		if data, err := os.ReadFile(agents); err == nil {
+			t.Skipf("permissions not enforced on this filesystem (still readable: %q)", data)
+		}
+		t.Cleanup(func() { _ = os.Chmod(agents, 0o644) })
+		if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("CLAUDE-FALLBACK-MARKER\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := captureSystem(t, eng)
+	if !strings.Contains(sys, "CLAUDE-FALLBACK-MARKER") {
+		t.Fatal("discovery must fall through to CLAUDE.md when AGENTS.md is unreadable")
+	}
+	if strings.Contains(sys, "UNREADABLE-MARKER") {
+		t.Fatal("unreadable AGENTS.md content must not be injected")
 	}
 }
 

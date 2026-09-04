@@ -159,9 +159,14 @@ func run() error {
 	// dispatches tool calls. The REPL opens one session JSONL file per
 	// conversation and attaches it to the engine as SessionLog; the ID is
 	// derived from the wall clock so session files never collide.
+	// New assembles the system prompt (including the optional project
+	// instruction file) and fails on an unreadable explicit config.
 	sessionID := time.Now().Format("20060102-150405")
 	ui := repl.NewTextUI(os.Stdin, os.Stdout)
-	engine := agent.New(*cfg, client, sbx, allow, auditLog, ui, sessionID)
+	engine, err := agent.New(*cfg, client, sbx, allow, auditLog, ui, sessionID)
+	if err != nil {
+		return err
+	}
 	r := repl.New(cfg, ui, engine, stateDir, version)
 	return r.Run()
 }
