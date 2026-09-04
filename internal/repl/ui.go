@@ -238,6 +238,25 @@ func (u *TextUI) ReadUserLine() (string, error) {
 	}
 }
 
+// menuEntry is one entry of the /-command menu. confirm marks commands
+// whose accidental execution is costly (/exit quits, /new wipes history):
+// they only run when the user typed the full command or explicitly moved
+// the selection with arrows, never from a stray Enter on a partial prefix.
+type menuEntry struct {
+	line    string
+	confirm bool
+}
+
+// menuSelection is returned by the raw reader when the user executes a
+// command from the /-menu with Enter: its line is what the REPL should run.
+type menuSelection struct {
+	line string
+}
+
+func (m menuSelection) Error() string {
+	return "menu selection: " + m.line
+}
+
 // ReadUserInteractive reads one logical user message from a TTY in raw
 // (character) mode. While typing: a Tab at the empty prompt calls onTab
 // (the mode toggle), printable characters echo, Backspace erases, Enter
@@ -245,7 +264,17 @@ func (u *TextUI) ReadUserLine() (string, error) {
 // with a trailing "\" or pasted in one burst are merged like ReadUserLine.
 // prompt is called for every redraw so the visible prefix follows mode
 // toggles immediately.
-func (u *TextUI) ReadUserInteractive(prompt func() string, onTab func()) (string, error) {
+//
+// When menu is non-nil and the draft starts with "/", the entries it
+// returns are shown below the input: Up/Down move the highlight, Enter
+// executes the highlighted entry (returned as menuSelection), Tab accepts
+// it into the line, and typing filters. Esc dismisses the menu for the rest
+// of the line (typing no longer reopens it). Entries marked confirm only
+// run when the full command was typed or the selection was moved with
+// arrows, so a stray Enter on "/e" cannot accidentally quit. The menu is
+// only rendered on color terminals; elsewhere "/" lines behave as plain
+// text (the REPL still dispatches them on submit).
+func (u *TextUI) ReadUserInteractive(prompt func() string, onTab func(), menu func(typed string) []menuEntry) (string, error) {
 	u.FinishStream()
 	restore, err := enterRawMode()
 	if err != nil {
@@ -255,16 +284,22 @@ func (u *TextUI) ReadUserInteractive(prompt func() string, onTab func()) (string
 		return u.ReadUserLine()
 	}
 	defer restore()
-	return u.readRawLines(prompt, onTab)
+	return u.readRawLines(prompt, onTab, menu)
 }
 
 // readRawLines drives the character-mode input loop and merges continuation
 // and pasted lines into one logical message (same rules as ReadUserLine).
-func (u *TextUI) readRawLines(prompt func() string, onTab func()) (string, error) {
+func (u *TextUI) readRawLines(prompt func() string, onTab func(), menu func(typed string) []menuEntry) (string, error) {
 	var sb strings.Builder
 	for {
-		line, err := u.readRawLine(prompt, onTab)
+		// The command menu only applies to the FIRST physical line: once a
+		// message has content, a leading "/" on a later line is text.
+		line, err := u.readRawLine(prompt, onTab, menu, sb.Len() == 0)
 		if err != nil {
+			var sel menuSelection
+			if errors.As(err, &sel) {
+				return sel.line, nil
+			}
 			if err == io.EOF && sb.Len() > 0 {
 				return sb.String(), nil
 			}
@@ -296,24 +331,90 @@ func (u *TextUI) readRawLines(prompt func() string, onTab func()) (string, error
 }
 
 // readRawLine reads one physical line in raw mode, echoing keys itself. The
-// prompt is drawn first and redrawn after Tab toggles. A Tab toggles the
+// prompt is drawn first and redrawn after every change. A Tab toggles the
 // mode only when pressed at the empty prompt with nothing buffered (a real
 // keystroke, not paste); anywhere else it is literal text, so pasting
-// tab-indented code can never flip the mode or drop the draft.
-func (u *TextUI) readRawLine(prompt func() string, onTab func()) (string, error) {
+// tab-indented code can never flip the mode or drop the draft. See
+// ReadUserInteractive for the "/"-menu behavior enabled by menuAllowed.
+func (u *TextUI) readRawLine(prompt func() string, onTab func(), menu func(typed string) []menuEntry, menuAllowed bool) (string, error) {
 	draft := []rune{}
+	cands := []menuEntry{}
+	sel := 0
+	drawnRows := 0         // menu rows currently on screen below the input
+	lastTyped := ""        // draft text the visible menu was filtered by
+	menuBlocked := false   // one-shot dismiss (Tab accept)
+	menuDismissed := false // Esc closed the menu for the rest of this line
+	navigated := false     // the user moved the highlight with arrows
+
+	// fmtPrintf to u.out without the mutex; we are the only writer while
+	// reading a line in raw mode.
 	draw := func() {
-		line := prompt() + string(draft)
-		if u.color {
-			// ANSI erase-to-end-of-line; VT processing is enabled exactly
-			// when colors are on.
-			fmt.Fprintf(u.out, "\r\x1b[K%s", line)
-		} else {
-			// No ANSI (NO_COLOR / legacy console): overwrite the line with
-			// spaces instead of emitting escape codes.
-			fmt.Fprintf(u.out, "\r%s\r%s", strings.Repeat(" ", len(line)), line)
+		typed := string(draft)
+		// Refresh the candidate list.
+		if typed != lastTyped {
+			sel = 0
+			lastTyped = typed
 		}
+		cands = nil
+		if menuAllowed && u.color && menu != nil && u.in.Buffered() == 0 &&
+			len(draft) > 0 && draft[0] == '/' && !menuBlocked && !menuDismissed {
+			c := menu(typed)
+			if len(c) > 0 {
+				cands = c
+			}
+		}
+		menuBlocked = false
+		if sel >= len(cands) {
+			sel = 0
+		}
+		if !u.color {
+			// No ANSI (NO_COLOR / legacy console): no menu is ever drawn,
+			// so a space-overwrite redraw of the input line is enough.
+			line := prompt() + string(draft)
+			fmt.Fprintf(u.out, "\r%s\r%s", strings.Repeat(" ", len(line)), line)
+			return
+		}
+		// Clear the input row and whatever menu rows were drawn before,
+		// moving back up, then redraw input and the current menu.
+		fmt.Fprintf(u.out, "\r\x1b[K")
+		for i := 0; i < drawnRows; i++ {
+			fmt.Fprint(u.out, "\n\x1b[K")
+		}
+		if drawnRows > 0 {
+			fmt.Fprintf(u.out, "\x1b[%dA", drawnRows)
+		}
+		fmt.Fprintf(u.out, "\r\x1b[K%s", prompt()+string(draft))
+		for i, c := range cands {
+			fmt.Fprint(u.out, "\n\x1b[K")
+			if i == sel {
+				fmt.Fprint(u.out, "\x1b[7m"+c.line+"\x1b[0m")
+			} else {
+				fmt.Fprint(u.out, u.paint("2", c.line))
+			}
+		}
+		if len(cands) > 0 {
+			fmt.Fprintf(u.out, "\x1b[%dA", len(cands))
+		}
+		drawnRows = len(cands)
 	}
+
+	// submit ends the line and leaves the cursor on a fresh row. The typed
+	// input line itself stays visible (transcripts match the no-color and
+	// cooked paths); only the ephemeral menu rows below it are cleared.
+	submit := func() {
+		if drawnRows > 0 {
+			// Cursor sits at the end of the input row: go down clearing each
+			// menu row, then return to the input row end.
+			for i := 0; i < drawnRows; i++ {
+				fmt.Fprint(u.out, "\n\x1b[K")
+			}
+			fmt.Fprintf(u.out, "\x1b[%dA", drawnRows)
+		}
+		fmt.Fprintln(u.out)
+		drawnRows = 0
+	}
+
+	menuVisible := func() bool { return len(cands) > 0 }
 	draw()
 	for {
 		r, _, err := u.in.ReadRune()
@@ -322,7 +423,13 @@ func (u *TextUI) readRawLine(prompt func() string, onTab func()) (string, error)
 		}
 		switch r {
 		case '\t':
-			if len(draft) == 0 && u.in.Buffered() == 0 {
+			if menuVisible() {
+				// Menu open: accept the highlighted command into the line
+				// and dismiss the menu (a later Enter runs it).
+				draft = []rune(cands[sel].line)
+				menuBlocked = true
+				draw()
+			} else if len(draft) == 0 && u.in.Buffered() == 0 {
 				// A genuine Tab keystroke at the empty prompt toggles the
 				// mode. Tabs typed or pasted into a message (mid-line, or
 				// any tab while input is still streaming in) are content.
@@ -335,7 +442,21 @@ func (u *TextUI) readRawLine(prompt func() string, onTab func()) (string, error)
 				u.write(string(r))
 			}
 		case '\r', '\n':
-			fmt.Fprintln(u.out)
+			if menuVisible() {
+				entry := cands[sel]
+				if entry.confirm && entry.line != string(draft) && !navigated {
+					// Guarded (destructive) command reached only by typing a
+					// partial prefix: a stray Enter must not quit or wipe
+					// the session - submit the draft instead (it hits the
+					// unknown-command path and the REPL keeps running).
+					submit()
+					return string(draft), nil
+				}
+				// Enter executes the highlighted command.
+				submit()
+				return "", menuSelection{line: entry.line}
+			}
+			submit()
 			return string(draft), nil
 		case 0x7f, '\b':
 			if len(draft) > 0 {
@@ -346,38 +467,85 @@ func (u *TextUI) readRawLine(prompt func() string, onTab func()) (string, error)
 			// Ctrl+C reached us as a byte because raw mode disabled the
 			// terminal's signal processing. Same meaning as at the idle
 			// cooked prompt: quit.
+			submit()
 			return "", errUserQuit
 		case 0x1b:
-			// Escape: swallow a real escape sequence (CSI/SS3) so its bytes
-			// are neither echoed nor typed. A lone Escape is put back and
-			// discarded harmlessly on the next read: nothing is swallowed
-			// that the user typed deliberately.
+			// Escape: swallow real sequences (CSI/SS3) and interpret arrow
+			// keys against the open menu. A lone Escape dismisses the menu
+			// or is dropped.
 			next, _, rerr := u.in.ReadRune()
 			if rerr != nil {
+				if rerr == io.EOF {
+					// Stream ended right after ESC: treat as lone Escape.
+					if menuVisible() {
+						menuDismissed = true
+						menuBlocked = true
+						draw()
+					}
+					continue
+				}
 				return string(draft), rerr
 			}
 			switch next {
-			case '[': // CSI: ESC [ ... final byte 0x40-0x7e
-				for i := 0; i < 16; i++ {
-					final, _, rerr := u.in.ReadRune()
-					if rerr != nil {
-						return string(draft), rerr
+			case '[': // CSI: ESC [ ...
+				key, _, rerr := u.in.ReadRune()
+				if rerr != nil {
+					if rerr == io.EOF {
+						continue // truncated sequence: drop it
 					}
-					if final >= 0x40 && final <= 0x7e {
-						break
+					return string(draft), rerr
+				}
+				switch key {
+				case 'A', 'B': // Up / Down arrow
+					if menuVisible() {
+						if key == 'A' {
+							sel = (sel - 1 + len(cands)) % len(cands)
+						} else {
+							sel = (sel + 1) % len(cands)
+						}
+						navigated = true
+						draw()
+					}
+				case 'C', 'D': // Right / Left: not used by the menu
+				default:
+					// Multi-byte sequences ([1~ etc.): consume up to the
+					// final byte (0x40-0x7e).
+					if key < 0x40 || key > 0x7e {
+						for i := 0; i < 16; i++ {
+							final, _, rerr := u.in.ReadRune()
+							if rerr != nil {
+								return string(draft), rerr
+							}
+							if final >= 0x40 && final <= 0x7e {
+								break
+							}
+						}
 					}
 				}
 			case 'O': // SS3 (F1-F4): ESC O P
 				_, _, _ = u.in.ReadRune()
 			default:
-				// Not a sequence: put the rune back so it reaches the
-				// draft on the next iteration (lone Escape is dropped).
+				// Whatever followed was not a sequence: put it back so the
+				// user's next keystroke is processed normally.
 				_ = u.in.UnreadRune()
+				if menuVisible() {
+					// A lone Escape closes the menu for the REST of the
+					// line: typing after it must not reopen the menu, so a
+					// later Enter submits the draft instead of running a
+					// highlighted command.
+					menuDismissed = true
+					menuBlocked = true
+					draw()
+				}
 			}
 		default:
 			if r >= ' ' {
 				draft = append(draft, r)
 				u.write(string(r))
+				if len(draft) > 0 && draft[0] == '/' && menuAllowed && u.color {
+					// Typing inside a slash line: refresh the menu/filter.
+					draw()
+				}
 			}
 			// Other control characters are ignored without echo.
 		}

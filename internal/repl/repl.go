@@ -89,8 +89,9 @@ func (r *REPL) Run() error {
 		var err error
 		if r.ui.Interactive() {
 			// Real terminal: raw-mode input so Tab toggles plan/build mode
-			// instantly while the prompt is being typed.
-			line, err = r.ui.ReadUserInteractive(r.prompt, r.toggleMode)
+			// instantly, and typing "/" opens the command menu (arrows to
+			// select, Tab to accept, Enter to run, typing to filter).
+			line, err = r.ui.ReadUserInteractive(r.prompt, r.toggleMode, slashMenu)
 		} else {
 			// Piped input (CI smoke tests etc.): cooked lines only; use the
 			// /mode command to switch.
@@ -171,6 +172,40 @@ func (r *REPL) banner() {
 	r.ui.Info("  shell commands need your approval. type /help for commands.")
 }
 
+// slashCommand is one REPL command: the executable line and a short usage
+// description. This table is the single source of truth for the /help text
+// and for the interactive command menu shown when the user types "/".
+type slashCommand struct {
+	line  string
+	usage string
+}
+
+// slashCommands lists the built-in commands in menu/help order.
+var slashCommands = []slashCommand{
+	{"/help", "this help"},
+	{"/new", "clear conversation history (starts a new session file)"},
+	{"/approvals", "show approval rules (allowlist + denylist)"},
+	{"/mode", "show the current mode (plan/build); /mode plan or /mode build switches"},
+	{"/exit", "quit"},
+}
+
+// slashMenu filters the command table by what the user typed after "/"
+// (case-insensitive prefix match). It drives the interactive menu; an empty
+// result means "no command matches - behave like plain text". Commands that
+// end or reset the session (/exit, /new) are marked confirm so a stray
+// Enter on a partial prefix cannot fire them (see menuEntry in ui.go).
+func slashMenu(typed string) []menuEntry {
+	prefix := strings.ToLower(typed)
+	var out []menuEntry
+	for _, c := range slashCommands {
+		if strings.HasPrefix(c.line, prefix) {
+			confirm := c.line == "/exit" || c.line == "/new"
+			out = append(out, menuEntry{line: c.line, confirm: confirm})
+		}
+	}
+	return out
+}
+
 // handleCommand dispatches a slash command. It returns quit=true when the
 // REPL should exit, and an error when the failure is fatal (vs. just
 // reporting an unknown command, which prints a hint instead).
@@ -179,12 +214,12 @@ func (r *REPL) handleCommand(line string) (bool, error) {
 	cmd := strings.ToLower(parts[0])
 	switch cmd {
 	case "/help":
-		r.ui.Info(`commands:
-  /help       this help
-  /new        clear conversation history (starts a new session file)
-  /approvals  show approval rules (allowlist + denylist)
-  /mode       show the current mode (plan/build); /mode plan or /mode build switches
-  /exit       quit`)
+		var b strings.Builder
+		b.WriteString("commands:")
+		for _, c := range slashCommands {
+			fmt.Fprintf(&b, "\n  %-12s %s", c.line, c.usage)
+		}
+		r.ui.Info(b.String())
 		return false, nil
 	case "/mode":
 		r.handleMode(parts)

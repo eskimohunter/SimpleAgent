@@ -113,8 +113,15 @@ mutex-guarded writer shared by several goroutines. When input is a real
 terminal (`TextUI.Interactive`), the REPL enters raw character mode
 (`enterRawMode` in the `console_*.go` files — termios on Linux,
 `SetConsoleMode` on Windows) and reads keys itself: `ReadUserInteractive`
-(`ui.go:246`) echoes printable keys, handles Backspace, and turns a Tab
-press into the plan/build toggle (`REPL.toggleMode`, `repl.go:145`). Piped
+(`ui.go:277`) echoes printable keys, handles Backspace, and turns a Tab
+press into the plan/build toggle (`REPL.toggleMode`, `repl.go:148`). It
+also owns the command menu: typing `/` lists the built-in commands
+(`slashCommands`, `repl.go:184`) below the input, ↑/↓ move the highlight,
+Enter executes the selection (returned to the REPL as a normal slash
+line), Tab accepts it into the line and Esc dismisses the menu for the
+rest of the line; typing filters via `slashMenu` (`repl.go:197`).
+`menuEntry.confirm` guards `/exit` and `/new` so a stray Enter on a
+partial prefix submits the draft instead of quitting or resetting. Piped
 input skips raw mode entirely; use `/mode` there.
 
 ### Step 6 — `internal/approvals` and `internal/audit`
