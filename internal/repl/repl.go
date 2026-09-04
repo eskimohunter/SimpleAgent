@@ -1,3 +1,7 @@
+// Package repl is the human-facing side of the harness: a read-eval-print
+// loop that reads user messages, runs agent turns, prints the streamed
+// output, and handles the /commands and the Ctrl+C interrupt logic. The
+// actual console drawing lives in ui.go (and the per-OS console_*.go files).
 package repl
 
 import (
@@ -13,6 +17,9 @@ import (
 	"simpleagent/internal/config"
 )
 
+// REPL runs the interactive loop. sessionFile is the open JSONL file of the
+// current conversation (see openSession); it is attached to the engine as
+// its SessionLog so every message is persisted as it happens.
 type REPL struct {
 	cfg         *config.Config
 	ui          *TextUI
@@ -22,12 +29,18 @@ type REPL struct {
 	version     string
 }
 
+// New creates the REPL and immediately opens a session file for the first
+// conversation.
 func New(cfg *config.Config, ui *TextUI, engine *agent.Engine, stateDir, version string) *REPL {
 	r := &REPL{cfg: cfg, ui: ui, engine: engine, stateDir: stateDir, version: version}
 	r.openSession()
 	return r
 }
 
+// openSession starts a new conversation log: it closes any previous session
+// file, creates .agent/sessions/ if needed, and opens a fresh JSONL file
+// named by timestamp. The engine's SessionID is the file name, so entries
+// in the session log and the audit trail refer to the same conversation.
 func (r *REPL) openSession() {
 	if r.sessionFile != nil {
 		_ = r.sessionFile.Close()
@@ -46,8 +59,16 @@ func (r *REPL) openSession() {
 	r.engine.SessionID = filepath.Base(path)
 }
 
+// Run is the main REPL loop. It prints the banner, installs the Ctrl+C
+// handler, then alternates between reading a user line and running one
+// engine turn until the user exits.
 func (r *REPL) Run() error {
 	r.banner()
+	// The signal goroutine gives Ctrl+C two meanings:
+	//   - while a turn is running (turnCancel set): cancel that turn;
+	//   - at the idle prompt: quit the program.
+	// The first press calls cancel(); the engine returns promptly with
+	// context.Canceled and turnCancel is cleared, so a second press exits.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 	var turnCancel context.CancelFunc
@@ -84,6 +105,8 @@ func (r *REPL) Run() error {
 			}
 			continue
 		}
+		// Each user message runs in its own cancellable context; turnCancel
+		// is published to the signal goroutine above while it is live.
 		turnCtx, cancel := context.WithCancel(context.Background())
 		turnCancel = cancel
 		_, err = r.engine.RunTurn(turnCtx, line)
@@ -99,6 +122,8 @@ func (r *REPL) Run() error {
 	}
 }
 
+// banner prints the startup summary: version, project root, the model
+// endpoint (credentials masked, or "mock" in demo mode) and state dir.
 func (r *REPL) banner() {
 	ep := "mock (built-in demo server)"
 	if !r.cfg.Mock {
@@ -111,6 +136,9 @@ func (r *REPL) banner() {
 	r.ui.Info("  shell commands need your approval. type /help for commands.")
 }
 
+// handleCommand dispatches a slash command. It returns quit=true when the
+// REPL should exit, and an error when the failure is fatal (vs. just
+// reporting an unknown command, which prints a hint instead).
 func (r *REPL) handleCommand(line string) (bool, error) {
 	parts := strings.Fields(line)
 	cmd := strings.ToLower(parts[0])
@@ -123,11 +151,15 @@ func (r *REPL) handleCommand(line string) (bool, error) {
   /exit       quit`)
 		return false, nil
 	case "/new":
+		// Reset the engine's in-memory history and rotate to a fresh
+		// session file, so each conversation has its own JSONL.
 		r.engine.Reset()
 		r.openSession()
 		r.ui.Info("session reset.")
 		return false, nil
 	case "/approvals":
+		// Split presentation: prefix rules come from the config allowlist,
+		// exact commands from the user's "always" answers.
 		exact, prefixes := r.engine.AllowList()
 		if len(exact) == 0 && len(prefixes) == 0 {
 			r.ui.Info("no approvals configured.")

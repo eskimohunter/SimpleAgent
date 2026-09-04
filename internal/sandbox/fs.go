@@ -13,22 +13,31 @@ import (
 	"strings"
 )
 
+// FilesConfig carries the byte caps applied to every file read and write.
 type FilesConfig struct {
 	MaxReadBytes  int
 	MaxWriteBytes int
 }
 
+// Sandbox bundles the confinement Root with the size caps, and implements
+// the four file tools the model may call: List, ReadFile, WriteFile and
+// Search. Every method starts by routing its path argument through
+// Root.Resolve - so nothing here can touch a file outside the root, no
+// matter what the caller (the model) asked for.
 type Sandbox struct {
 	root *Root
 	cfg  FilesConfig
 }
 
+// Entry is one row of a directory listing.
 type Entry struct {
 	Path  string
 	Size  int64
 	IsDir bool
 }
 
+// NewFiles builds a Sandbox rooted at the current working directory. Used
+// by tests that want a sandbox without a pre-made Root.
 func NewFiles(cfg FilesConfig) (*Sandbox, error) {
 	r, err := NewRoot(".")
 	if err != nil {
@@ -37,14 +46,19 @@ func NewFiles(cfg FilesConfig) (*Sandbox, error) {
 	return &Sandbox{root: r, cfg: cfg}, nil
 }
 
+// NewSandbox builds a Sandbox around an existing Root (the normal startup
+// path in main.go).
 func NewSandbox(root *Root, cfg FilesConfig) *Sandbox {
 	return &Sandbox{root: root, cfg: cfg}
 }
 
+// Root exposes the containment root so callers can get the project's
+// absolute path (e.g. as the working directory for shell commands).
 func (s *Sandbox) Root() *Root {
 	return s.root
 }
 
+// human renders a byte count compactly for listings (1 KB, 2.5 MB, ...).
 func human(n int64) string {
 	switch {
 	case n < 1024:
@@ -58,6 +72,11 @@ func human(n int64) string {
 	}
 }
 
+// List renders a directory listing as text for the model: one level, or
+// recursively (depth-capped at 8, entry-capped at maxEntries, 2000 by
+// default) so a huge tree cannot flood the context window. ".agent" is
+// shown as "protected" in flat listings and skipped entirely in recursive
+// ones.
 func (s *Sandbox) List(path string, recursive bool, maxEntries int) (string, error) {
 	if maxEntries <= 0 {
 		maxEntries = 2000
@@ -83,10 +102,13 @@ func (s *Sandbox) List(path string, recursive bool, maxEntries int) (string, err
 	return s.listFlat(abs, relBase)
 }
 
+// isHiddenState reports whether a directory entry is the harness state dir
+// (case-insensitive, for Windows).
 func isHiddenState(name string) bool {
 	return strings.EqualFold(name, ".agent")
 }
 
+// disp renders an empty relative path as "." for user-facing messages.
 func disp(rel string) string {
 	if rel == "" {
 		return "."
@@ -94,6 +116,7 @@ func disp(rel string) string {
 	return rel
 }
 
+// listFlat renders one directory level, sorted by name, with sizes.
 func (s *Sandbox) listFlat(dirAbs, relBase string) (string, error) {
 	ents, err := os.ReadDir(dirAbs)
 	if err != nil {
@@ -116,6 +139,10 @@ func (s *Sandbox) listFlat(dirAbs, relBase string) (string, error) {
 	return b.String(), nil
 }
 
+// listRecursive walks the tree with a recursive closure (a function value
+// that calls itself - note it must be declared with var first so the closure
+// can reference itself). Depth and total entries are capped; errStopListing
+// is the sentinel that aborts the walk early without being an error.
 func (s *Sandbox) listRecursive(dirAbs, relBase string, maxEntries int) (string, error) {
 	var b strings.Builder
 	count := 0
@@ -180,8 +207,13 @@ func (s *Sandbox) listRecursive(dirAbs, relBase string, maxEntries int) (string,
 	return b.String(), nil
 }
 
+// errStopListing is a sentinel error used internally to halt a recursive
+// listing once the entry cap is reached; it is filtered out of results, so
+// callers never see it (errors.Is distinguishes it from real failures).
 var errStopListing = errors.New("listing stopped")
 
+// joinSlash concatenates a relative base and a name with "/" (the model
+// always sees forward slashes, even on Windows).
 func joinSlash(base, name string) string {
 	if base == "" {
 		return name
@@ -189,6 +221,7 @@ func joinSlash(base, name string) string {
 	return base + "/" + name
 }
 
+// kind returns the one-letter-ish kind tag used in flat listings.
 func kind(fi fs.FileInfo) string {
 	if fi.IsDir() {
 		return "dir "
@@ -200,6 +233,10 @@ type lineNumberer struct {
 	width int
 }
 
+// ReadFile implements the read_file tool. Small files (at or under the read
+// cap, no offset given) are read whole; larger files must be paged with a
+// 1-based line offset so reads stay within the output cap. Returns text
+// with "N|" line-number prefixes (see readWhole/readRanged).
 func (s *Sandbox) ReadFile(path string, offset, limit int) (string, error) {
 	abs, err := s.root.Resolve(path)
 	if err != nil {
@@ -227,6 +264,9 @@ func (s *Sandbox) ReadFile(path string, offset, limit int) (string, error) {
 	return s.readRanged(rel, abs, offset, limit)
 }
 
+// numWidth returns the column width needed to print count line numbers
+// (grows from 4 as the number of digits grows; overkill for huge files but
+// keeps the ruler stable within one listing).
 func numWidth(count int) int {
 	w := 4
 	for n := count; n >= 10; n /= 10 {
@@ -235,6 +275,9 @@ func numWidth(count int) int {
 	return w
 }
 
+// readWhole reads an entire small file and renders it line-numbered. Binary
+// junk is sanitized: invalid UTF-8 bytes are replaced with U+FFFD (the
+// replacement character) so the model never receives corrupt text.
 func (s *Sandbox) readWhole(rel, abs string, size int64) (string, error) {
 	data, err := os.ReadFile(abs)
 	if err != nil {
@@ -253,6 +296,12 @@ func (s *Sandbox) readWhole(rel, abs string, size int64) (string, error) {
 	return b.String(), nil
 }
 
+// readRanged pages through a file starting at 1-based line offset. It scans
+// (never loads the whole file) and enforces several safety limits: the
+// scanner buffer is capped at MaxReadBytes per line, single lines are
+// truncated at 4000 characters, and the total output stops once it reaches
+// the read cap - with a "# ... more lines follow" hint telling the model how
+// to continue.
 func (s *Sandbox) readRanged(rel, abs string, offset, limit int) (string, error) {
 	f, err := os.Open(abs)
 	if err != nil {
@@ -305,6 +354,8 @@ func (s *Sandbox) readRanged(rel, abs string, offset, limit int) (string, error)
 	return out.String(), nil
 }
 
+// fileSize stats a path and returns its size (0 on any error). Used only
+// for display in readRanged's messages, so errors are ignored.
 func fileSize(path string) int64 {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -313,6 +364,10 @@ func fileSize(path string) int64 {
 	return fi.Size()
 }
 
+// WriteFile implements the write_file tool: it overwrites (or, with append,
+// extends) the file at path with content. Parents are created as needed.
+// The content cap is checked BEFORE any filesystem work, so an oversized
+// write never touches disk.
 func (s *Sandbox) WriteFile(path, content string, append_ bool) (string, error) {
 	if len(content) > s.cfg.MaxWriteBytes {
 		return "", fmt.Errorf("content is %d bytes, above the %d byte write cap", len(content), s.cfg.MaxWriteBytes)
@@ -329,6 +384,8 @@ func (s *Sandbox) WriteFile(path, content string, append_ bool) (string, error) 
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return "", err
 	}
+	// append_ is named with a trailing underscore because "append" is a
+	// builtin function in Go and cannot be used as an identifier.
 	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	verb := "wrote"
 	if append_ {
@@ -357,6 +414,13 @@ func (s *Sandbox) WriteFile(path, content string, append_ bool) (string, error) 
 	return fmt.Sprintf("%s %d bytes (%d lines) to %s", verb, n, lines, disp(rel)), nil
 }
 
+// Search implements the search_files tool: a contained regex grep over the
+// project tree (Go regexp syntax). Defensive limits keep a hostile or
+// hallucinated query cheap: at most 10,000 files are scanned, files over
+// 32 MB are skipped, binary files are detected (a NUL byte in the first 8 KB
+// means skip - text files almost never contain NUL), and each file reports
+// at most 50 lines, 500 matches globally. Symlinks, .agent and .git are
+// never followed or searched.
 func (s *Sandbox) Search(pattern, include string, maxResults int) (string, error) {
 	if maxResults <= 0 {
 		maxResults = 500
@@ -372,6 +436,7 @@ func (s *Sandbox) Search(pattern, include string, maxResults int) (string, error
 	var b strings.Builder
 	matches := 0
 	scanned := 0
+	// matched collects one hit into the output builder, capped globally.
 	matched := func(rel, line string, lineno int) {
 		if matches >= maxResults {
 			return
@@ -385,9 +450,14 @@ func (s *Sandbox) Search(pattern, include string, maxResults int) (string, error
 	}
 	err = filepath.WalkDir(s.root.abs, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// Unreadable directory etc.: skip rather than fail the search.
 			return nil
 		}
 		if d.Type()&os.ModeSymlink != 0 {
+			// WalkDir does not follow symlinks, but listing them could
+			// confuse the results; more importantly it never descends into
+			// a linked directory, so no link target outside the root is
+			// ever scanned.
 			return nil
 		}
 		name := d.Name()
@@ -406,6 +476,7 @@ func (s *Sandbox) Search(pattern, include string, maxResults int) (string, error
 			}
 		}
 		if scanned >= 10000 {
+			// filepath.SkipAll ends the whole walk, not just this branch.
 			return filepath.SkipAll
 		}
 		scanned++
@@ -421,6 +492,7 @@ func (s *Sandbox) Search(pattern, include string, maxResults int) (string, error
 			return nil
 		}
 		defer f.Close()
+		// Binary sniff: read the first 8 KB; a NUL byte means "not text".
 		head := make([]byte, 8192)
 		n, _ := f.Read(head)
 		if bytes.IndexByte(head[:n], 0) >= 0 {
@@ -459,6 +531,7 @@ func (s *Sandbox) Search(pattern, include string, maxResults int) (string, error
 	return out, nil
 }
 
+// includeNote words the "where" part of the search summary for the model.
 func includeNote(include string) string {
 	if include == "" {
 		return " in any file"
@@ -466,6 +539,8 @@ func includeNote(include string) string {
 	return " in files matching " + include
 }
 
+// matchGlob matches a glob against both the file's base name and its full
+// slash-form path, so include patterns like "*.go" and "test/**" both work.
 func matchGlob(glob, base, path string) bool {
 	ok, err := filepath.Match(glob, base)
 	if err == nil && ok {

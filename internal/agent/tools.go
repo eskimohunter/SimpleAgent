@@ -8,6 +8,8 @@ import (
 	"simpleagent/internal/model"
 )
 
+// ToolResult pairs a tool's text output with an optional error; Text() turns
+// the pair into the single string that gets sent back to the model.
 type ToolResult struct {
 	Content string
 	Error   error
@@ -20,6 +22,12 @@ func (t ToolResult) Text() string {
 	return t.Content
 }
 
+// fileTools is the catalog of sandbox-confined file operations offered to
+// the model. Each entry is a JSON Schema (see model.NewTool); the
+// descriptions are read by the model, so they double as its instructions -
+// keep them precise about paths, paging and the .agent restriction. All of
+// these are code-enforced inside the sandbox regardless of what the model
+// tries to pass as arguments.
 var fileTools = []model.Tool{
 	model.NewTool(
 		"list_files",
@@ -67,6 +75,9 @@ var fileTools = []model.Tool{
 	),
 }
 
+// shellTool is the single approval-gated tool: unlike the file tools it can
+// do anything (run tests, git, builds), so the harness always routes it
+// through the human approval prompt before executing.
 var shellTool = model.NewTool(
 	"run_command",
 	"Run a shell command inside the project root. The command is shown to the user and requires explicit approval; it may be denied. "+
@@ -80,6 +91,8 @@ var shellTool = model.NewTool(
 	[]string{"command"},
 )
 
+// AllTools returns the full tool list advertised to the model on every
+// request: the file tools first, then the shell tool.
 func AllTools() []model.Tool {
 	tools := make([]model.Tool, 0, len(fileTools)+1)
 	tools = append(tools, fileTools...)
@@ -87,6 +100,9 @@ func AllTools() []model.Tool {
 	return tools
 }
 
+// IsFileTool reports whether name is one of the sandbox-confined file tools.
+// The engine uses this to count file operations separately from commands and
+// to route dispatch correctly.
 func IsFileTool(name string) bool {
 	for _, t := range fileTools {
 		if t.Function.Name == name {
@@ -96,10 +112,17 @@ func IsFileTool(name string) bool {
 	return false
 }
 
+// decodeArgs parses a tool call's raw JSON argument blob (the model sends
+// arguments as a JSON *string* inside the function call) into a map of
+// name -> raw JSON value, so each getX helper can pull out the typed field
+// it needs. maxBytes is a safety cap on how much argument text we accept
+// from the model.
 func decodeArgs(name, raw string, maxBytes int) (map[string]json.RawMessage, error) {
 	if len(raw) > maxBytes {
 		return nil, fmt.Errorf("arguments too large")
 	}
+	// json.RawMessage is a []byte that delays decoding: values keep their
+	// original JSON bytes until getStr/getInt/getBool interpret them.
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return nil, fmt.Errorf("invalid JSON arguments: %v", err)
@@ -110,6 +133,8 @@ func decodeArgs(name, raw string, maxBytes int) (map[string]json.RawMessage, err
 	return m, nil
 }
 
+// getStr extracts a string argument. A missing key is not an error: the
+// helper returns the zero value ("") and the tool decides how to handle it.
 func getStr(m map[string]json.RawMessage, key string) (string, error) {
 	raw, ok := m[key]
 	if !ok {
@@ -122,6 +147,7 @@ func getStr(m map[string]json.RawMessage, key string) (string, error) {
 	return v, nil
 }
 
+// getInt extracts an integer argument (missing key -> 0), mirroring getStr.
 func getInt(m map[string]json.RawMessage, key string) (int, error) {
 	raw, ok := m[key]
 	if !ok {
@@ -134,6 +160,8 @@ func getInt(m map[string]json.RawMessage, key string) (int, error) {
 	return v, nil
 }
 
+// getBool extracts a boolean argument (missing key -> false), mirroring
+// getStr. append_ in the write_file handler is the only caller so far.
 func getBool(m map[string]json.RawMessage, key string) (bool, error) {
 	raw, ok := m[key]
 	if !ok {
@@ -146,6 +174,9 @@ func getBool(m map[string]json.RawMessage, key string) (bool, error) {
 	return v, nil
 }
 
+// truncateArgs shortens a raw argument string for display in the UI and the
+// audit log, so one huge write_file payload cannot flood the screen or the
+// log file.
 func truncateArgs(raw string) string {
 	const limit = 500
 	if len(raw) > limit {
@@ -154,6 +185,9 @@ func truncateArgs(raw string) string {
 	return raw
 }
 
+// nowISO returns the current UTC time in RFC3339 form. Logs and session
+// files use UTC deliberately so timestamps are unambiguous and comparable
+// across machines and timezones.
 func nowISO() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }

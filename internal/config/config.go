@@ -1,3 +1,13 @@
+// Package config loads, merges and validates the harness configuration.
+//
+// Configuration is assembled in layers, each overriding the previous one:
+// built-in defaults -> simpleagent.json (if present) -> AGENT_* environment
+// variables -> explicit --root/--config flag values. All validation happens
+// up front in Load, so the rest of the program can trust the Config it gets.
+//
+// Security-relevant rule: the API key is never stored in the config file.
+// api_key_env holds the *name* of an environment variable that contains the
+// key (see ModelConfig.APIKey and checkAPIKey).
 package config
 
 import (
@@ -14,6 +24,13 @@ import (
 	"strings"
 )
 
+// ModelConfig describes how to reach the OpenAI-compatible model server.
+//
+// APIKeyEnv is the NAME of an environment variable that holds the key
+// (e.g. "AGENT_API_KEY") - never the key itself. When it is empty no
+// Authorization header is sent. InsecureSkipVerify disables TLS certificate
+// verification, which some self-hosted LAN servers with self-signed
+// certificates require; keep it false unless you know why you need it.
 type ModelConfig struct {
 	BaseURL            string  `json:"base_url"`
 	Model              string  `json:"model"`
@@ -23,6 +40,10 @@ type ModelConfig struct {
 	TimeoutSec         int     `json:"timeout_sec"`
 }
 
+// ShellConfig controls how run_command invokes the operating system shell:
+// Command/Args name the shell binary and its fixed flags (per-OS defaults
+// come from Defaults), DefaultTimeoutSec is the kill-after timeout and
+// MaxOutputBytes the cap on how much stdout/stderr is kept for the model.
 type ShellConfig struct {
 	Command           string   `json:"command"`
 	Args              []string `json:"args"`
@@ -30,21 +51,34 @@ type ShellConfig struct {
 	MaxOutputBytes    int      `json:"max_output_bytes"`
 }
 
+// FilesConfig caps the size of file reads and writes performed through the
+// sandboxed file tools, protecting the model's context window and the disk.
 type FilesConfig struct {
 	MaxReadBytes  int `json:"max_read_bytes"`
 	MaxWriteBytes int `json:"max_write_bytes"`
 }
 
+// ApprovalsConfig governs automatic command approval. Allowlist entries are
+// exact commands, or prefixes when they end in "*"; matching commands never
+// prompt. Persist controls whether commands the user approves with "always"
+// survive restarts (they are stored in .agent/approvals.json).
 type ApprovalsConfig struct {
 	Allowlist []string `json:"allowlist"`
 	Persist   bool     `json:"persist"`
 }
 
+// SessionConfig bounds one interactive session: MaxMessages is how much
+// history is kept in the model context (oldest messages are trimmed away)
+// and MaxToolCallsPerTurn stops an agent that never stops calling tools.
 type SessionConfig struct {
 	MaxMessages         int `json:"max_messages"`
 	MaxToolCallsPerTurn int `json:"max_tool_calls_per_turn"`
 }
 
+// Config is the fully merged configuration handed to the rest of the
+// program. Mock and ConfigPath use `json:"-"` so they are never read from or
+// written to a config file: Mock comes from the --mock flag and ConfigPath
+// records where the file (if any) was loaded from.
 type Config struct {
 	Root       string          `json:"root"`
 	Model      ModelConfig     `json:"model"`
@@ -56,6 +90,10 @@ type Config struct {
 	ConfigPath string          `json:"-"`
 }
 
+// Defaults returns a fresh Config with built-in values. The shell is the one
+// OS-dependent choice: `sh -c` on Unix, and on Windows powershell.exe with
+// flags that make it non-interactive (no prompts, no profile scripts, no
+// execution-policy interference) so commands can run unattended.
 func Defaults() Config {
 	shellCmd := "sh"
 	shellArgs := []string{"-c"}
@@ -94,6 +132,9 @@ func Defaults() Config {
 	}
 }
 
+// applyFile merges a simpleagent.json file into the current config.
+// json.Unmarshal only touches the keys present in the file, so any field the
+// file omits silently keeps the value it already had (e.g. the defaults).
 func (c *Config) applyFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -106,6 +147,10 @@ func (c *Config) applyFile(path string) error {
 	return nil
 }
 
+// applyEnv overlays the AGENT_BASE_URL / AGENT_MODEL / AGENT_TEMPERATURE
+// environment variables, so a model can be pointed at without editing any
+// file. Invalid temperature values are silently ignored (the file value or
+// default stands).
 func (c *Config) applyEnv() {
 	if v := os.Getenv("AGENT_BASE_URL"); v != "" {
 		c.Model.BaseURL = v
@@ -120,6 +165,10 @@ func (c *Config) applyEnv() {
 	}
 }
 
+// Validate checks the merged configuration for the values the rest of the
+// program depends on: a non-empty root, a reachable model when not in mock
+// mode, a sane API-key setup, and positive, bounded limits. It is the last
+// step of Load, so errors here abort startup with a clear message.
 func (c *Config) Validate() error {
 	if c.Root == "" {
 		return errors.New("project root is empty")
@@ -159,6 +208,8 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// findDefaultConfig looks for a simpleagent.json sitting next to the given
+// root directory, and returns "" if there is none.
 func findDefaultConfig(root string) string {
 	if root == "" {
 		return ""
@@ -170,6 +221,10 @@ func findDefaultConfig(root string) string {
 	return ""
 }
 
+// Load builds the effective configuration: defaults, then the config file
+// (--config, else auto-discovered next to the root), then environment
+// overrides, then the --root flag which always wins. The root is converted to
+// an absolute path and the result validated before being returned.
 func Load(flagRoot, flagConfig string, mock bool) (*Config, error) {
 	c := Defaults()
 	c.Mock = mock
@@ -211,6 +266,9 @@ func Load(flagRoot, flagConfig string, mock bool) (*Config, error) {
 	return &c, nil
 }
 
+// APIKey returns the actual key by reading the environment variable whose
+// name is stored in APIKeyEnv ("" if no variable is configured). This is the
+// only place the key value enters the program - never the config file.
 func (m ModelConfig) APIKey() string {
 	if m.APIKeyEnv == "" {
 		return ""
@@ -218,6 +276,9 @@ func (m ModelConfig) APIKey() string {
 	return os.Getenv(m.APIKeyEnv)
 }
 
+// MaskedBaseURL renders the base URL for the startup banner with any
+// embedded credentials redacted (http://user:pass@host -> http://***@host).
+// Called only when a key is actually configured, so secrets never print.
 func (m ModelConfig) MaskedBaseURL() string {
 	if m.BaseURL == "" {
 		return ""
@@ -233,6 +294,9 @@ func (m ModelConfig) MaskedBaseURL() string {
 	return u[:schemeEnd] + "***@" + u[schemeEnd:]
 }
 
+// indexOf reports the byte offset of the first occurrence of sub in s, or
+// -1 if sub is absent. (Kept as a tiny helper so MaskedBaseURL does not need
+// the strings package's allocs for one search.)
 func indexOf(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -242,10 +306,18 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+// envNameRe matches what a valid POSIX environment variable name looks like.
+// Used to tell a real variable NAME (AGENT_API_KEY) apart from a leaked key
+// value that someone accidentally pasted into api_key_env.
 func envNameRe() *regexp.Regexp {
 	return regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 }
 
+// checkAPIKey enforces the key-handling rules. It rejects configs whose
+// api_key_env is not a plausible variable name (users sometimes paste the key
+// itself here), and refuses to talk to a remote https endpoint without a key
+// present. The one exemption: https servers on the local machine (loopback)
+// such as localhost proxies are allowed to be keyless.
 func (c *Config) checkAPIKey() error {
 	if c.Model.APIKeyEnv == "" {
 		return nil
@@ -266,6 +338,9 @@ func (c *Config) checkAPIKey() error {
 	return nil
 }
 
+// isLoopbackHost reports whether hostport (a host, or host:port pair)
+// refers to the local machine: "localhost" or a loopback IP such as
+// 127.0.0.1 or ::1.
 func isLoopbackHost(hostport string) bool {
 	host := hostport
 	if h, _, err := net.SplitHostPort(hostport); err == nil {

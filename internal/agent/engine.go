@@ -1,3 +1,11 @@
+// Package agent runs the model interaction loop: it keeps the conversation
+// history, calls the model client, dispatches the tool calls the model
+// requests, and integrates the two enforcement layers - the sandboxed file
+// tools and the approval gate in front of shell commands.
+//
+// The Engine is the orchestrator; the actual tool definitions live in
+// tools.go. The UI is injected as an interface so the engine never prints
+// directly and can be driven headless in tests.
 package agent
 
 import (
@@ -18,12 +26,18 @@ import (
 	"simpleagent/internal/sandbox"
 )
 
+// UI is everything the engine needs from the outside world that is not a
+// tool: streaming the model's words as they arrive, showing notices (tool
+// calls, command output, warnings), and asking the human whether a command
+// may run. repl.TextUI is the only production implementation.
 type UI interface {
 	StreamText(string)
 	Notice(kind, msg string)
 	ApproveCommand(ctx context.Context, cmd string) (approvals.Decision, error)
 }
 
+// TurnSummary aggregates what happened during one user turn, so the REPL and
+// tests can report or assert on activity without parsing the history.
 type TurnSummary struct {
 	UserText       string
 	AssistantText  string
@@ -34,6 +48,10 @@ type TurnSummary struct {
 	StopReason     string
 }
 
+// Engine owns one agent session: the conversation state and the loop that
+// drives the model. The exported fields are dependencies wired in by the
+// caller; the unexported fields are the session state (system prompt,
+// message history, temp dir for commands).
 type Engine struct {
 	Client              *model.Client
 	Sbx                 *sandbox.Sandbox
@@ -51,6 +69,8 @@ type Engine struct {
 	tempDir  string
 }
 
+// New wires a fresh engine: it snapshots the config the session should obey
+// and seeds the history with the system prompt built for this project root.
 func New(cfg config.Config, client *model.Client, sbx *sandbox.Sandbox, allow *approvals.Manager, auditLog *audit.Audit, ui UI, sessionID string) *Engine {
 	e := &Engine{
 		Client:              client,
@@ -69,6 +89,8 @@ func New(cfg config.Config, client *model.Client, sbx *sandbox.Sandbox, allow *a
 	return e
 }
 
+// AllowList returns the current command auto-approvals, split into exact
+// commands and prefixes, for the /approvals REPL command.
 func (e *Engine) AllowList() (exact, prefixes []string) {
 	if e.Allow == nil {
 		return nil, nil
@@ -76,6 +98,11 @@ func (e *Engine) AllowList() (exact, prefixes []string) {
 	return e.Allow.List()
 }
 
+// buildSystemPrompt composes the model's standing instructions: the sandbox
+// rules (relative paths only, .agent off-limits, no network), shell
+// approval behavior, and how to use the file tools. The model reads these
+// rules as text - they are advice - while the sandbox and approval gate
+// enforce the same boundaries in code.
 func buildSystemPrompt(root string) string {
 	osName := runtime.GOOS
 	if osName == "windows" {
@@ -101,25 +128,42 @@ Rules:
 Today's date: %s`, osName, root, shellName, time.Now().Format("2006-01-02 15:04")) + "\n"
 }
 
+// Reset starts a fresh conversation: the history is truncated back to just
+// the system prompt (index 0).
 func (e *Engine) Reset() {
 	e.messages = e.messages[:1]
 }
 
+// History returns a copy of the current message list, so callers cannot
+// mutate the engine's internal history by accident.
 func (e *Engine) History() []model.Message {
 	out := make([]model.Message, len(e.messages))
 	copy(out, e.messages)
 	return out
 }
 
+// trimmedSlice returns the history capped to at most MaxMessages entries,
+// for the model request. The trimming rules keep the protocol valid:
+//   - the system message (index 0) is always kept;
+//   - we drop whole leading entries, and never cut between an assistant
+//     message with tool calls and the "tool" results that answer them -
+//     the model API rejects an orphaned tool result.
+//
+// Note that the in-memory history is left untouched; only the request copy
+// is trimmed.
 func (e *Engine) trimmedSlice() []model.Message {
 	msgs := e.messages
 	if len(msgs) <= e.MaxMessages {
 		return msgs
 	}
+	// Keep MaxMessages-2 entries so we never discard the pair (assistant
+	// tool-call message + its tool results) sitting at the cut boundary.
 	keep := e.MaxMessages - 2
 	if keep < 2 {
 		keep = 2
 	}
+	// Slide the start forward past any tool messages that would otherwise
+	// end up orphaned at the front of the trimmed window.
 	start := len(msgs) - keep
 	for start < len(msgs) && msgs[start].Role == "tool" {
 		start++
@@ -133,6 +177,9 @@ func (e *Engine) trimmedSlice() []model.Message {
 	return out
 }
 
+// appendLog records a message in the in-memory history AND, when a session
+// file is attached (SessionLog), appends it as one JSONL line for later
+// inspection or replay.
 func (e *Engine) appendLog(msg model.Message) {
 	e.messages = append(e.messages, msg)
 	if e.SessionLog == nil {
@@ -145,6 +192,8 @@ func (e *Engine) appendLog(msg model.Message) {
 	_, _ = e.SessionLog.Write(append(line, '\n'))
 }
 
+// audit writes one event to the audit trail when an auditor is configured.
+// Callers ignore the error on purpose: auditing must never break the turn.
 func (e *Engine) audit(kind string, data map[string]any) {
 	if e.Audit == nil {
 		return
@@ -152,6 +201,14 @@ func (e *Engine) audit(kind string, data map[string]any) {
 	_ = e.Audit.Log(kind, data)
 }
 
+// RunTurn processes one user message to completion. It runs the agent loop:
+// send the history (plus tools) to the model, execute every tool call the
+// model asks for, feed the results back, and repeat - until the model
+// answers with plain text, the context is cancelled (Ctrl+C), or the
+// MaxToolCallsPerTurn cap is hit so a runaway agent cannot loop forever.
+//
+// On error the history is rolled back to what it was before the turn, so a
+// failed turn does not poison the next one.
 func (e *Engine) RunTurn(ctx context.Context, userText string) (sum TurnSummary, err error) {
 	userText = strings.TrimSpace(userText)
 	if userText == "" {
@@ -177,6 +234,7 @@ func (e *Engine) RunTurn(ctx context.Context, userText string) (sum TurnSummary,
 			Tools:       AllTools(),
 			Temperature: e.cfg.Model.Temperature,
 		}
+		// Stream the model's words to the UI live as they arrive.
 		reply, err := e.Client.Chat(ctx, req, func(text string) {
 			if e.UI != nil {
 				e.UI.StreamText(text)
@@ -193,11 +251,14 @@ func (e *Engine) RunTurn(ctx context.Context, userText string) (sum TurnSummary,
 		})
 
 		if len(reply.ToolCalls) == 0 {
+			// The model answered in plain text: the turn is done.
 			sum.AssistantText = reply.Content
 			sum.StopReason = "answer"
 			return sum, nil
 		}
 
+		// Execute each requested tool and append its result to the history
+		// so the model sees it on the next loop iteration.
 		for _, tc := range reply.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				return sum, err
@@ -211,6 +272,7 @@ func (e *Engine) RunTurn(ctx context.Context, userText string) (sum TurnSummary,
 			})
 		}
 	}
+	// Loop exited without a text answer: the per-turn tool-call cap hit.
 	sum.StopReason = "tool-call limit reached"
 	if e.UI != nil {
 		e.UI.Notice("warn", fmt.Sprintf("stopped after %d tool iterations; use /new to reset context", e.MaxToolCallsPerTurn))
@@ -218,6 +280,12 @@ func (e *Engine) RunTurn(ctx context.Context, userText string) (sum TurnSummary,
 	return sum, nil
 }
 
+// dispatchTool executes one tool call: it updates the summary counters,
+// reports the call to the UI and audit log (with truncated args), decodes
+// the JSON arguments, and routes to the file-tool handler or the command
+// tool. Every path returns a string the model sees; errors become
+// "ERROR: ..." strings rather than Go errors, because a failed tool call is
+// still information the model should get.
 func (e *Engine) dispatchTool(ctx context.Context, sum *TurnSummary, tc model.ToolCall) string {
 	sum.ToolCalls++
 	if e.UI != nil {
@@ -228,6 +296,8 @@ func (e *Engine) dispatchTool(ctx context.Context, sum *TurnSummary, tc model.To
 		"call_id": tc.ID,
 		"args":    truncateArgs(tc.Function.Arguments),
 	})
+	// Cap the argument blob at 8 MB: anything larger is a hallucinated or
+	// malicious call and is rejected before touching the sandbox.
 	args, err := decodeArgs(tc.Function.Name, tc.Function.Arguments, 8*1024*1024)
 	if err != nil {
 		return err.Error()
@@ -245,6 +315,11 @@ func (e *Engine) dispatchTool(ctx context.Context, sum *TurnSummary, tc model.To
 	}
 }
 
+// runFileTool executes one of the sandboxed file tools (list/read/write/
+// search). Each case pulls its arguments out of the decoded map and forwards
+// them to the corresponding sandbox method; every sandbox call starts with a
+// path-containment check, so no path the model invents can escape the
+// project root.
 func (e *Engine) runFileTool(ctx context.Context, name string, args map[string]json.RawMessage) string {
 	if err := ctx.Err(); err != nil {
 		return "ERROR: operation canceled"
@@ -318,6 +393,10 @@ func (e *Engine) runFileTool(ctx context.Context, name string, args map[string]j
 	return fmt.Sprintf("ERROR: unknown file tool %q", name)
 }
 
+// runCommandTool executes the approval-gated shell tool. Order matters:
+// the command may only reach the sandbox executor after the human approved
+// it (or the allowlist matched). The result string is assembled from the
+// sandbox result so the model sees stdout/stderr plus an exit status.
 func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[string]json.RawMessage) string {
 	if err := ctx.Err(); err != nil {
 		return "ERROR: operation canceled"
@@ -330,6 +409,8 @@ func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[
 	if cmdline == "" {
 		return "ERROR: empty command"
 	}
+	// A tool-supplied timeout overrides the config default, but is clamped
+	// to 600 seconds so the model cannot disable the kill switch.
 	timeoutSec, err := getInt(args, "timeout_sec")
 	if err != nil {
 		return err.Error()
@@ -342,6 +423,7 @@ func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[
 		timeout = time.Duration(timeoutSec) * time.Second
 	}
 
+	// THE approval gate: allowlist match first, then the interactive prompt.
 	approved, remember := e.approveCommand(ctx, cmdline)
 	if !approved {
 		sum.DeniedCommands++
@@ -368,7 +450,10 @@ func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[
 		Timeout:        timeout,
 		MaxOutputBytes: e.cfg.Shell.MaxOutputBytes,
 		StripSecrets:   true,
-	}, cmdline,
+	},
+		// The two callbacks stream the child's stdout/stderr to the UI live,
+		// so the user watches the command run while it runs.
+		cmdline,
 		func(p []byte) {
 			if e.UI != nil {
 				e.UI.Notice("out", string(p))
@@ -397,6 +482,13 @@ func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[
 	return sandbox.FormatResult(res)
 }
 
+// approveCommand decides whether cmdline may run. Order of checks:
+//  1. configured/persisted allowlist -> run without asking ("once" scope);
+//  2. no UI attached (headless) -> deny, since no human can approve;
+//  3. interactive prompt: yes-once / always / no.
+//
+// remember reports whether the user chose "always" so the caller can persist
+// the command (it is also recorded by Remember inside the switch).
 func (e *Engine) approveCommand(ctx context.Context, cmdline string) (approved, remember bool) {
 	if e.Allow != nil {
 		if ok, _ := e.Allow.Allowed(cmdline); ok {
