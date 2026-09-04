@@ -58,11 +58,16 @@ jobs:
         run: |
           tag="${{ steps.tag.outputs.tag }}"
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag already exists; delete it first or bump the tag" >&2
-            exit 1
+            if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+              echo "release $tag already exists; delete it or bump the tag" >&2
+              exit 1
+            fi
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+            echo "attached assets to existing release $tag"
+          else
+            args=()
+            case "$tag" in
+              *-*) args+=(--prerelease) ;;
+            esac
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes "${args[@]}"
           fi
-          args=()
-          case "$tag" in
-            *-*) args+=(--prerelease) ;;
-          esac
-          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes "${args[@]}"
