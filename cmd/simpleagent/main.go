@@ -103,11 +103,13 @@ func run() error {
 
 	// Load the approval manager: commands that match the configured prefix
 	// allowlist, or previously "always"-approved commands (persisted in
-	// approvals.json), run without an approval prompt.
+	// approvals.json), run without an approval prompt. Commands matching
+	// the config denylist are hard-blocked before anything else.
 	allow, err := approvals.New(
 		filepath.Join(stateDir, "approvals.json"),
 		cfg.Approvals.Persist,
 		cfg.Approvals.Allowlist,
+		cfg.Approvals.Denylist,
 	)
 	if err != nil {
 		return err

@@ -98,6 +98,15 @@ func (e *Engine) AllowList() (exact, prefixes []string) {
 	return e.Allow.List()
 }
 
+// DenyList returns the configured hard-block rules (exact commands and
+// prefixes) for the /approvals REPL command.
+func (e *Engine) DenyList() (exact, prefixes []string) {
+	if e.Allow == nil {
+		return nil, nil
+	}
+	return e.Allow.DenyList()
+}
+
 // buildSystemPrompt composes the model's standing instructions: the sandbox
 // rules (relative paths only, .agent off-limits, no network), shell
 // approval behavior, and how to use the file tools. The model reads these
@@ -423,8 +432,20 @@ func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[
 		timeout = time.Duration(timeoutSec) * time.Second
 	}
 
-	// THE approval gate: allowlist match first, then the interactive prompt.
-	approved, remember := e.approveCommand(ctx, cmdline)
+	// THE approval gate: denylist block -> allowlist match -> prompt.
+	approved, remember, blocked := e.approveCommand(ctx, cmdline)
+	if blocked {
+		// Hard block by configuration: never runs, never prompts - not even
+		// a human "always" can override it in this session. The model gets
+		// a distinct message so it does not mistake policy for a user
+		// denial and retry the same command.
+		sum.DeniedCommands++
+		e.audit("approval_denied", map[string]any{"command": cmdline, "reason": "denylist"})
+		if e.UI != nil {
+			e.UI.Notice("deny", "blocked (config denylist): "+cmdline)
+		}
+		return fmt.Sprintf("ERROR: the command %q is on the configuration denylist and was blocked without running. Propose an alternative that does not use it.", cmdline)
+	}
 	if !approved {
 		sum.DeniedCommands++
 		e.audit("approval_denied", map[string]any{"command": cmdline})
@@ -483,34 +504,42 @@ func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[
 }
 
 // approveCommand decides whether cmdline may run. Order of checks:
-//  1. configured/persisted allowlist -> run without asking ("once" scope);
-//  2. no UI attached (headless) -> deny, since no human can approve;
-//  3. interactive prompt: yes-once / always / no.
+//  1. config denylist -> hard block: never runs, never prompts, and the
+//     allowlist below is NOT consulted (a deny rule always wins). The
+//     caller gets blocked=true to phrase the result appropriately;
+//  2. configured/persisted allowlist -> run without asking ("once" scope);
+//  3. no UI attached (headless) -> deny, since no human can approve;
+//  4. interactive prompt: yes-once / always / no.
 //
 // remember reports whether the user chose "always" so the caller can persist
 // the command (it is also recorded by Remember inside the switch).
-func (e *Engine) approveCommand(ctx context.Context, cmdline string) (approved, remember bool) {
+func (e *Engine) approveCommand(ctx context.Context, cmdline string) (approved, remember, blocked bool) {
 	if e.Allow != nil {
+		// Deny rules are checked first and always win: a blocked command
+		// never runs even if the allowlist would auto-approve it.
+		if ok, _ := e.Allow.Denied(cmdline); ok {
+			return false, false, true
+		}
 		if ok, _ := e.Allow.Allowed(cmdline); ok {
-			return true, false
+			return true, false, false
 		}
 	}
 	if e.UI == nil {
-		return false, false
+		return false, false, false
 	}
 	dec, err := e.UI.ApproveCommand(ctx, cmdline)
 	if err != nil {
-		return false, false
+		return false, false, false
 	}
 	switch dec {
 	case approvals.AllowOnce:
-		return true, false
+		return true, false, false
 	case approvals.AllowAlways:
 		if e.Allow != nil {
 			_ = e.Allow.Remember(cmdline)
 		}
-		return true, true
+		return true, true, false
 	default:
-		return false, false
+		return false, false, false
 	}
 }

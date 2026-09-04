@@ -174,3 +174,25 @@ func TestFlagOverridesFileRoot(t *testing.T) {
 		t.Fatalf("flag root must win over file root: %s", c.Root)
 	}
 }
+
+func TestDenylistDefaultsEmptyAndFileLoaded(t *testing.T) {
+	if d := Defaults().Approvals.Denylist; d != nil && len(d) != 0 {
+		t.Fatalf("denylist must default to empty, got %v", d)
+	}
+	dir := t.TempDir()
+	cfg := `{
+		"model": {"base_url": "http://h/v1", "model": "m"},
+		"approvals": {"denylist": ["curl*", "wget*"]}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "simpleagent.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(dir, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.Approvals.Denylist
+	if len(got) != 2 || got[0] != "curl*" || got[1] != "wget*" {
+		t.Fatalf("denylist not applied from file: %v", got)
+	}
+}

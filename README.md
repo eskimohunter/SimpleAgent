@@ -86,10 +86,12 @@ Config file: `simpleagent.json` in the project root (or pass `--config`).
 Start from `simpleagent.json.example` in this repository, copy it to the
 project root and edit. Shown values match the built-in defaults except:
 `model.base_url` and `model.model` are placeholders and are required unless
-you run with `--mock`; the `approvals.allowlist` entries are recommendations,
-not defaults — commands matching them run **without** an approval prompt, so
-curate that list. The shell (`powershell.exe` on Windows, `sh` elsewhere)
-uses built-in per-OS defaults when `command`/`args` are omitted.
+you run with `--mock`; the `approvals.allowlist` and `approvals.denylist`
+entries are recommendations, not defaults. Allowlisted commands run
+**without** an approval prompt, so curate that list. Denylisted commands
+(see below) are hard-blocked. The shell (`powershell.exe` on Windows,
+`sh` elsewhere) uses built-in per-OS defaults when `command`/`args` are
+omitted.
 
 ```json
 {
@@ -112,6 +114,11 @@ uses built-in per-OS defaults when `command`/`args` are omitted.
   },
   "approvals": {
     "allowlist": ["git status", "git diff*"],
+    "denylist": [
+      "curl*", "wget*", "nc*", "ncat*", "netcat*", "socat*",
+      "telnet*", "ftp*", "ssh*", "scp*", "sftp*", "rsync*",
+      "Invoke-WebRequest*", "Invoke-RestMethod*", "iwr*", "irm*"
+    ],
     "persist": true
   },
   "session": {
@@ -120,6 +127,20 @@ uses built-in per-OS defaults when `command`/`args` are omitted.
   }
 }
 ```
+
+`approvals.denylist` blocks commands so they can **never** run, even if the
+allowlist matches or you would answer "always" at the prompt — a matching
+command is refused before any prompt and reported to the agent as blocked
+by configuration. Entries use the same syntax as the allowlist (an exact
+command, or a prefix when it ends in `*`), and matching is case-insensitive,
+so `curl*` blocks `curl`, `Curl` and `curl.exe`. Rules match the command as
+typed at the start of the line only — a wrapper such as `bash -c "curl …"`,
+`/usr/bin/curl …` or `cd dir && wget …` does not match and still reaches the
+approval prompt, which remains the backstop for those forms. The built-in
+defaults ship an empty denylist; the entries above are recommendations for
+keeping project files on the machine — the harness itself has no network
+path except the configured model endpoint, and these commands would be the
+way an approved shell command reaches out to the internet.
 
 Environment overrides: `AGENT_BASE_URL`, `AGENT_MODEL`, `AGENT_TEMPERATURE`.
 The API key is read from the env var named by `api_key_env` — that field must
@@ -140,7 +161,7 @@ server etc.).
 |---|---|
 | plain text     | send a message to the agent (multiline: end a line with `\`) |
 | `y` / `a` / `n` | at an approval prompt: run once / always allow / deny |
-| `/approvals`   | show the current allowlist and persisted approvals |
+| `/approvals`     | show the current allowlist and denylist rules |
 | `/new`         | reset conversation (new session file) |
 | `/help`        | this list |
 | `/exit`        | quit |

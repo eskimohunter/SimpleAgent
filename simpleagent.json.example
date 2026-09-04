@@ -18,6 +18,11 @@
   },
   "approvals": {
     "allowlist": ["git status", "git diff*"],
+    "denylist": [
+      "curl*", "wget*", "nc*", "ncat*", "netcat*", "socat*",
+      "telnet*", "ftp*", "ssh*", "scp*", "sftp*", "rsync*",
+      "Invoke-WebRequest*", "Invoke-RestMethod*", "iwr*", "irm*"
+    ],
     "persist": true
   },
   "session": {

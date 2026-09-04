@@ -147,7 +147,7 @@ func (r *REPL) handleCommand(line string) (bool, error) {
 		r.ui.Info(`commands:
   /help       this help
   /new        clear conversation history (starts a new session file)
-  /approvals  show the current command allowlist
+  /approvals  show approval rules (allowlist + denylist)
   /exit       quit`)
 		return false, nil
 	case "/new":
@@ -158,10 +158,12 @@ func (r *REPL) handleCommand(line string) (bool, error) {
 		r.ui.Info("session reset.")
 		return false, nil
 	case "/approvals":
-		// Split presentation: prefix rules come from the config allowlist,
-		// exact commands from the user's "always" answers.
+		// Split presentation: allowlist prefix rules come from the config,
+		// exact commands from the config allowlist and the user's "always"
+		// answers; the denylist (always config, lower-cased) is printed last.
 		exact, prefixes := r.engine.AllowList()
-		if len(exact) == 0 && len(prefixes) == 0 {
+		dExact, dPrefixes := r.engine.DenyList()
+		if len(exact) == 0 && len(prefixes) == 0 && len(dExact) == 0 && len(dPrefixes) == 0 {
 			r.ui.Info("no approvals configured.")
 			return false, nil
 		}
@@ -172,8 +174,17 @@ func (r *REPL) handleCommand(line string) (bool, error) {
 			}
 		}
 		if len(exact) > 0 {
-			r.ui.Info("exact commands (persisted approvals):")
+			r.ui.Info("exact commands (allowlist / persisted approvals):")
 			for _, c := range exact {
+				r.ui.Info("  " + c)
+			}
+		}
+		if len(dPrefixes) > 0 || len(dExact) > 0 {
+			r.ui.Info("blocked commands (config denylist):")
+			for _, p := range dPrefixes {
+				r.ui.Info("  " + p + "*")
+			}
+			for _, c := range dExact {
 				r.ui.Info("  " + c)
 			}
 		}
