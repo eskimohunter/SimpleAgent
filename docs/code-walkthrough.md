@@ -5,6 +5,8 @@ who is new to Go and to this codebase. It complements:
 
 - `README.md` — how to build, configure and run SimpleAgent;
 - `docs/security.md` — the threat model and what is enforced where;
+- `docs/architecture.png` — one-page architecture diagram (console ↔ engine
+  ↔ model client, enforcement layers, state dirs, startup wiring);
 - `plan.md` — the original design (architecture diagrams, tool table).
 
 Every source file now carries package/type/function comments; read this guide
