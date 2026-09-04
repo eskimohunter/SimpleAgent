@@ -23,7 +23,7 @@ output is untrusted text, the harness does not *ask* it nicely to behave — it
 | What the model can do | Gate | Enforced by |
 |---|---|---|
 | `list_files`, `read_file`, `write_file`, `search_files` | none per-op | `sandbox.Root.Resolve` — every path checked (`internal/sandbox/paths.go:150`) |
-| `run_command` (shell) | human approval prompt | `agent.Engine.approveCommand` (`engine.go:491`) + `approvals` |
+| `run_command` (shell) | deny → allowlist → approval prompt | `agent.Engine.approveCommand` + `approvals` |
 | anything else | — | impossible: no other tools, no network code path |
 
 Everything the agent does is written to an append-only audit trail
@@ -37,7 +37,7 @@ internal/config     merged configuration (defaults → file → env)
 internal/model      OpenAI-compatible chat client + SSE parser + wire types
 internal/agent      the agent loop: history, model calls, tool dispatch
 internal/repl       interactive console: prompts, streaming, Ctrl+C
-internal/approvals  auto-approval rules (allowlist + persisted "always")
+internal/approvals  command gates: allowlist + persisted "always" (auto-approve) and denylist (hard block)
 internal/audit      append-only JSONL event log
 internal/sandbox    the security core: path containment, file tools, exec
 internal/mock       scripted offline model server for --mock
@@ -82,13 +82,13 @@ subtle part of the whole project.
 - `tools.go` declares what the model may call. The descriptions are read by
   the model, so they double as instructions; the enforcement happens in the
   sandbox regardless.
-- `engine.go` is the loop. `RunTurn` (`engine.go:212`) is the most important
+- `engine.go` is the loop. `RunTurn` (`engine.go:221`) is the most important
   function in the program: send history → model answers → dispatch its tool
   calls → feed results back → repeat until it answers in plain text. Read
   also:
-  - `trimmedSlice` (`engine.go:154`) — history is capped for the model
+  - `trimmedSlice` (`engine.go:163`) — history is capped for the model
     context, but never in a way that orphans tool results;
-  - `runCommandTool` (`engine.go:400`) — the approval gate in action;
+  - `runCommandTool` (`engine.go:409`) — the approval gate in action;
   - `dispatchTool`/`runFileTool` — argument decoding and routing.
 
 ### Step 5 — `internal/repl/repl.go` and `ui.go`
@@ -101,9 +101,13 @@ mutex-guarded writer shared by several goroutines.
 
 ### Step 6 — `internal/approvals` and `internal/audit`
 Two small, self-contained packages. Approvals answers "may this command run
-without asking?" (config prefix rules + persisted "always" commands,
-`approvals.go:95`); note the whitespace-normalizing `normalize`
-(`approvals.go:89`) and the atomic tmp+rename save (`approvals.go:128`).
+without asking?" — the allow side (config prefix rules + persisted "always"
+commands, `Allowed`, `approvals.go:188`) auto-approves; the deny side
+(`Denied`) hard-blocks matching commands regardless of allowlist or human
+answer, and is checked first by the engine. Deny matching is
+case-insensitive because the default Windows shell is. Note the
+whitespace-normalizing `normalize` (`approvals.go:180`) and the atomic
+tmp+rename save (`approvals.go:213`).
 Audit appends one JSON line per event, flushed immediately so a crash cannot
 lose the trail (`audit.go:42`).
 
@@ -146,7 +150,7 @@ approval prompt too.
 you type a message
    │
    ▼
-REPL.Run ──► Engine.RunTurn (engine.go:212)        [repl.go:65]
+REPL.Run ──► Engine.RunTurn (engine.go:221)        [repl.go:65]
    │             │ appends your message to history + audit
    ▼             ▼
         Client.Chat (client.go:60)  ── POST {base_url}/chat/completions
@@ -156,10 +160,14 @@ REPL.Run ──► Engine.RunTurn (engine.go:212)        [repl.go:65]
    ┌── model asked for tool calls? ── no ──► turn done (answer printed)
    │  yes
    ▼
-dispatchTool (engine.go:289)
+dispatchTool (engine.go:298)
    ├── file tool? ─► Sandbox.ReadFile/WriteFile/List/Search
    │                  every path through Root.Resolve → contained, no prompt
-   └── run_command? ─► approveCommand (engine.go:492)
+   └── run_command? ─► approveCommand (engine.go:516)
+                        deny rule match?  ─yes─► blocked: never runs,
+                        │                  no prompt (hard block)
+                        │ no
+                        ▼
                         allowlist match?  ─yes─► run
                         │ no
                         ▼
@@ -191,13 +199,13 @@ what the concept is and where to see it first.
 | `internal/` packages | `internal` cannot be imported from outside this module — a language-level way to keep these packages private | every `import "simpleagent/internal/..."` in `main.go` |
 | Errors as values | No exceptions: functions return an `error`; callers check it. `fmt.Errorf("…: %w", err)` wraps an error to add context | `config.go:172`, `main.go:53` pattern |
 | `defer` | "Run this when the function returns" — cleanup written next to the resource | `auditLog.Close()` in `main.go`; `defer f.Close()` in `fs.go:305` (`readRanged`) |
-| Pointers `*T` | A pointer stores a memory address; methods taking a pointer receiver (`func (e *Engine)`) can mutate the struct | `engine.go:212` `RunTurn` |
+| Pointers `*T` | A pointer stores a memory address; methods taking a pointer receiver (`func (e *Engine)`) can mutate the struct | `engine.go:221` `RunTurn` |
 | `&x` and why `Content *string` | The chat API omits absent fields; `nil` pointer → field omitted (`types.go:23`); `TextMessage` copies its param to take its address (`types.go:47`) |
 | Interfaces | A set of method signatures; any type implementing them satisfies the interface. `agent.UI` is implemented by `repl.TextUI` | `engine.go:33` + `ui.go:24` |
 | `io.Reader`/`io.Writer` | Interfaces for "source of bytes"/"sink of bytes" — `os.Stdout`, files, pipes all satisfy them | `NewTextUI(in io.Reader, out io.Writer)` `ui.go:35` |
 | Goroutines `go f()` | Run `f` concurrently on another thread | reader goroutines in `exec.go:177` |
 | Channels + `select` | Channels pass values between goroutines; `select` waits on several at once | ctx watcher in `exec.go:177`; approval prompt ctx in `ui.go:159` |
-| `context.Context` | Carries cancellation (Ctrl+C, timeouts) through calls | `RunTurn(ctx, …)` `engine.go:212` |
+| `context.Context` | Carries cancellation (Ctrl+C, timeouts) through calls | `RunTurn(ctx, …)` `engine.go:221` |
 | `sync.Mutex` | Serialize access to shared data from several goroutines | `TextUI.mu` (`ui.go:24`), `tailWriter` (`exec.go:55`) |
 | `sync.Once` | "Run this exactly once, even if called concurrently" — the kill race | `exec.go:177` |
 | `sync.WaitGroup` | Wait until N goroutines finish | `exec.go:177` |
@@ -208,7 +216,7 @@ what the concept is and where to see it first.
 | Closures | Functions defined inline that capture surrounding variables (also used for recursive walking via `var walk func…`) | `listRecursive` `fs.go:146`, `onLine` `client.go:60` |
 | `strings.Builder` | Efficiently assemble a big string piece by piece | everywhere in `fs.go` listings |
 | Sentinel errors | Predefined errors compared with `errors.Is`, so behavior ≠ "string match" | `paths.go:24`, `errStopListing` `fs.go:213` |
-| `map[string]struct{}` | A set: only the keys matter, values cost nothing | `approvals.go:30` `exact` set |
+| `map[string]struct{}` | A set: only the keys matter, values cost nothing | `approvals.go:50` (ruleSet `exact` map) |
 
 ---
 
@@ -220,6 +228,7 @@ what the concept is and where to see it first.
 | SSE | Server-Sent Events: the HTTP streaming format (`data: …` lines) the model server uses (`client.go:60`) |
 | approval gate | The prompt before every shell command; "always" adds it to the persisted allowlist |
 | allowlist | Config entries (exact or `prefix*`) that auto-approve commands |
+| denylist | Config entries (exact or `prefix*`, matched case-insensitively) that HARD-BLOCK commands — checked before the allowlist and the prompt, never overridable at runtime (`engine.go` `approveCommand`; example entries in `simpleagent.json.example`) |
 | session | One conversation: an in-memory history + one JSONL file in `.agent/sessions/` |
 | audit | `.agent/audit.jsonl`: one JSON line per *event*, written for accountability |
 | sandbox | The confinement layer: `Root.Resolve` (paths) + capped file tools + safe exec |

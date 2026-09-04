@@ -55,6 +55,21 @@ Every file op goes through `sandbox.Root.Resolve` (`internal/sandbox/paths.go`):
   `n` (deny; the model receives an explicit "DENIED" result and must adapt).
   A denied command is never executed. Matching against the config
   `approvals.allowlist` (exact or `prefix*`) auto-approves without prompting.
+- **Denylist (hard block):** the config `approvals.denylist` (same exact /
+  `prefix*` syntax, case-insensitive matching) is checked **first**, before
+  the allowlist and before any prompt. A matching command never runs and is
+  never auto-approved: deny always wins over the allowlist and over an
+  "always" answer, because the denylist is the operator's policy rather than
+  the model's (or an inattentive moment's) choice. Audited as
+  `approval_denied` with `reason: denylist`. Matching is limited to the
+  command's literal start (same prefix semantics as the allowlist), so a
+  wrapper form such as `bash -c "curl …"` or `/usr/bin/curl …` is not
+  matched and still goes through the approval prompt. The shipped example
+  config
+  denylists common network-transfer commands (`curl`, `wget`, PowerShell's
+  `Invoke-WebRequest`/`Invoke-RestMethod`, `nc`, `ssh`, ...) so project
+  files cannot be sent off the machine through an approved shell command;
+  the built-in defaults ship an empty denylist — enable it deliberately.
 
 ### 3. Audit trail
 
