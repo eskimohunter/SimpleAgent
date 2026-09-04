@@ -70,6 +70,13 @@ First run creates the harness state directory inside your project:
 └── tmp/               # TEMP/TMP for shell commands
 ```
 
+The agent's file tools are confined to the project root, but `.agent/` and
+the harness config itself (`simpleagent.json` in the root, or the file you
+pass with `--config`) are **protected from the agent**: it cannot read,
+write, search, or list them beyond a `(protected)` tag, so it cannot edit
+its own rules. Point `--config` at a file outside the project root and the
+sandbox already makes it unreachable — recommended defense in depth.
+
 ### No model server yet? Try the offline demo
 
 ```

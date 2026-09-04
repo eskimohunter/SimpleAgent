@@ -128,7 +128,7 @@ Shell: %s (commands run non-interactively from the project root; no stdin is ava
 
 Rules:
 - All paths you handle are RELATIVE to the project root, using / as the separator. Never use absolute paths.
-- You can only read and write files inside the project root. The harness state directory .agent/ is protected and invisible; ignore it.
+- You can only read and write files inside the project root. Harness-owned files (.agent/ and the simpleagent.json config file) are protected and invisible; ignore them.
 - You have no network access and no access to anything outside the project root.
 - Shell commands (run_command) are shown to the user and may require approval; they can be denied. If a command is denied, do not retry it - propose an alternative or explain.
 - For inspecting code use search_files and read_file (line-numbered; pass offset/limit to page large files). Keep reads targeted; your context is limited.

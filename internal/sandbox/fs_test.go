@@ -227,3 +227,49 @@ func TestListRecursive(t *testing.T) {
 		t.Errorf("recursive listing missing nested file: %q", out)
 	}
 }
+
+func TestProtectedConfigSurface(t *testing.T) {
+	s := newTestSandbox(t)
+	cfgPath := filepath.Join(s.Root().Abs(), "simpleagent.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"base_url": "SECRET-URL-MARKER"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Root().Protect(cfgPath)
+	write(t, s, "other.txt", "SECRET-URL-MARKER\n")
+
+	// Read and write through the sandbox tools are refused outright.
+	if _, err := s.ReadFile("simpleagent.json", 0, 0); err == nil {
+		t.Fatal("read of protected config must be rejected")
+	}
+	if _, err := s.WriteFile("simpleagent.json", "pwned", false); err == nil {
+		t.Fatal("write to protected config must be rejected")
+	}
+
+	// Flat listing shows the tag, not file contents.
+	flat, err := s.List("", false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(flat, "harness config, protected") {
+		t.Errorf("flat listing must tag the protected config: %q", flat)
+	}
+
+	// Recursive listing omits it, search never reads it.
+	rec, err := s.List("", true, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(rec, "simpleagent.json") {
+		t.Errorf("recursive listing must omit the protected config: %q", rec)
+	}
+	out, err := s.Search("SECRET-URL-MARKER", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "simpleagent.json:") {
+		t.Errorf("search must skip the protected config: %q", out)
+	}
+	if !strings.Contains(out, "other.txt:") {
+		t.Errorf("search must still find unprotected files: %q", out)
+	}
+}

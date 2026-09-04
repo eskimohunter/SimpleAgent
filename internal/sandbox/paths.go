@@ -23,7 +23,7 @@ import (
 // tests can assert on the failure class.
 var (
 	ErrOutside   = errors.New("path escapes project root")
-	ErrProtected = errors.New("path refers to harness state (.agent), which is protected")
+	ErrProtected = errors.New("path refers to harness-owned data (.agent, the config file), which is protected")
 	ErrDevice    = errors.New("path contains a Windows device name or alternate stream")
 	ErrSymlink   = errors.New("path contains an unresolvable or escaping symlink")
 )
@@ -44,9 +44,61 @@ var reservedDeviceNames = map[string]bool{
 // Root is the confinement anchor: the project root directory in absolute
 // form, plus a flag recording whether the current OS is Windows (Windows
 // filesystems are case-insensitive, so containment comparisons must be too).
+// protected lists additional absolute paths inside the root that Resolve
+// must refuse (the harness's own files, e.g. its config) on top of the
+// always-protected .agent state directory.
 type Root struct {
-	abs string
-	win bool
+	abs       string
+	win       bool
+	protected []string
+}
+
+// Protect marks abs (or, on Windows/macOS, any case variant of it) as
+// harness-owned: Resolve will refuse it with ErrProtected from now on. The
+// path is absolute-normalized and symlink-canonicalized first, so a path
+// reached through a symlink (a --config under ~/link-to-proj, say) matches
+// the canonical forms Resolve produces. Paths outside the root never match
+// any Resolve result and are stored harmlessly. Call before any file tool
+// runs.
+func (r *Root) Protect(abs string) {
+	cleaned, err := filepath.Abs(abs)
+	if err != nil || cleaned == "" {
+		return
+	}
+	r.protected = append(r.protected, canonicalizePath(filepath.Clean(cleaned)))
+}
+
+// canonicalizePath resolves symlinks in an absolute path so it compares
+// equal to Resolve's output (which is built from the EvalSymlinks-resolved
+// root). For a not-yet-existing tail - protecting a file the agent must not
+// be able to create - symlinks in the existing ancestors are still resolved
+// and only the final element is kept lexical.
+func canonicalizePath(abs string) string {
+	real, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return real
+	}
+	dir, base := filepath.Split(abs)
+	realDir, err := filepath.EvalSymlinks(filepath.Clean(dir))
+	if err != nil {
+		return abs
+	}
+	return filepath.Join(realDir, base)
+}
+
+// isProtected reports whether the absolute path p matches one of the
+// registered protected files. Comparison folds case on EVERY platform (like
+// the .agent checks): Windows and macOS filesystems are case-insensitive by
+// default, and a case-variant path would otherwise reach the real file. On
+// case-sensitive filesystems this may over-protect a file whose name differs
+// from the protected one only by case - the safe direction.
+func (r *Root) isProtected(p string) bool {
+	for _, prot := range r.protected {
+		if strings.EqualFold(p, prot) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewRoot validates and locks in the project root. The directory must exist;
@@ -144,9 +196,13 @@ func elementStem(elem string) string {
 //  5. Windows-only: UNC prefixes, drive-relative segments, ":" (alternate
 //     data streams) and reserved device names anywhere in the path;
 //  6. canonical: the result must still sit inside the root;
-//  7. the first path element must not be ".agent" (harness-owned state);
+//  7. the first path element must not be ".agent" (harness-owned state),
+//     and the path must not be a registered protected file (the harness
+//     config; see Protect) - checked before any filesystem access, so
+//     protected files cannot even be created;
 //  8. every existing symlink/junction along the path must resolve to a
-//     target inside the root (see checkSymlinks).
+//     target inside the root (see checkSymlinks), and not onto .agent or a
+//     protected file.
 func (r *Root) Resolve(requested string) (string, error) {
 	if strings.IndexByte(requested, 0) >= 0 {
 		return "", ErrOutside
@@ -208,6 +264,13 @@ func (r *Root) Resolve(requested string) (string, error) {
 		}
 	}
 
+	// Refuse registered protected files (the harness config etc.) before
+	// the symlink walk. This is a pure path comparison, so it also blocks
+	// creating a not-yet-existing protected file.
+	if r.isProtected(p) {
+		return "", ErrProtected
+	}
+
 	if err := r.checkSymlinks(p); err != nil {
 		return "", err
 	}
@@ -220,9 +283,10 @@ func (r *Root) Resolve(requested string) (string, error) {
 // the link and we verify the target is still inside the root. Two failure
 // modes are caught: a link pointing outside the root, and a dangling link
 // (which must be rejected - otherwise a later write could create the target
-// elsewhere and let a file escape through a now-resolvable link). A link
-// resolving into .agent is likewise refused. On Windows, NTFS junctions
-// surface as symlinks too, so this closes the classic junction escape.
+// elsewhere and let a file escape through a now-resolvable link). Links that
+// resolve into .agent or onto a registered protected file (the harness
+// config) are likewise refused. On Windows, NTFS junctions surface as
+// symlinks too, so this closes the classic junction escape.
 func (r *Root) checkSymlinks(p string) error {
 	// Split the path into its elements relative to the root, then walk them
 	// one by one (cur grows root -> child -> ...). Windows paths must be
@@ -270,8 +334,9 @@ func (r *Root) checkSymlinks(p string) error {
 		if !r.inside(real) {
 			return fmt.Errorf("%w: %q resolves to %q", ErrOutside, cur, real)
 		}
-		// A symlink inside the root may still point INTO the protected
-		// state dir (root/.agent via a link elsewhere) - check and refuse.
+		// A symlink inside the root may still point into protected ground:
+		// the .agent state dir (via a link elsewhere in the tree) or a
+		// registered protected file such as the harness config - refuse.
 		if rel, err := filepath.Rel(r.abs, real); err == nil {
 			rel = filepath.ToSlash(rel)
 			first := rel
@@ -281,6 +346,9 @@ func (r *Root) checkSymlinks(p string) error {
 			if strings.EqualFold(first, ".agent") {
 				return fmt.Errorf("%w: %q resolves into the protected state dir", ErrProtected, cur)
 			}
+		}
+		if r.isProtected(real) {
+			return fmt.Errorf("%w: %q resolves to a protected harness file", ErrProtected, cur)
 		}
 		// Continue the walk from the link target, so a chain of links
 		// (a -> b -> ...) is each verified in turn.

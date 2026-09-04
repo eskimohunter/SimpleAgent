@@ -22,7 +22,7 @@ output is untrusted text, the harness does not *ask* it nicely to behave — it
 
 | What the model can do | Gate | Enforced by |
 |---|---|---|
-| `list_files`, `read_file`, `write_file`, `search_files` | none per-op | `sandbox.Root.Resolve` — every path checked (`internal/sandbox/paths.go:150`) |
+| `list_files`, `read_file`, `write_file`, `search_files` | none per-op | `sandbox.Root.Resolve` — every path checked (`internal/sandbox/paths.go:186`) |
 | `run_command` (shell) | deny → allowlist → approval prompt | `agent.Engine.approveCommand` + `approvals` |
 | anything else | — | impossible: no other tools, no network code path |
 
@@ -114,18 +114,20 @@ lose the trail (`audit.go:42`).
 ### Step 7 — `internal/sandbox` — read this twice
 This is the security core; `docs/security.md` explains the threat model.
 
-- `paths.go` — **the gate.** `Root.Resolve` (`paths.go:150`) turns any
+- `paths.go` — **the gate.** `Root.Resolve` (`paths.go:186`) turns any
   model-supplied path into an absolute path inside the project root, and
   rejects everything else: NUL bytes, Windows device names (`NUL`, `CON`…),
   alternate data streams (`:`), UNC/`\\?\` prefixes, `..` escapes, `.agent`,
+  registered protected files such as the harness config (`Root.Protect`),
   and — the subtle part — symlinks/junctions via `checkSymlinks`
-  (`paths.go:226`), which walks every existing ancestor and refuses links
-  that escape or dangle. Compare with `fs_test.go` and `paths_test.go`, which
-  attack this code with real symlink escapes.
+  (`paths.go:270`), which walks every existing ancestor and refuses links
+  that escape or dangle or land on protected ground. Compare with
+  `fs_test.go` and `paths_test.go`, which attack this code with real
+  symlink escapes.
 - `fs.go` — the file tools: listing (flat/recursive, entry- and
   depth-capped), reading (whole vs. paged with line numbers), writing
   (content-cap checked before touching disk), and search (a contained grep
-  with many defensive caps — see the `Search` comment, `fs.go:424`).
+  with many defensive caps — see the `Search` comment, `fs.go:436`).
 - `exec.go` — the shell executor. Read the `tailWriter` (`exec.go:55`): a
   ring buffer keeping only the last N bytes of output. Then `Run`
   (`exec.go:177`): process spawn, **why stdout/stderr must be drained by
@@ -198,7 +200,7 @@ what the concept is and where to see it first.
 |---|---|---|
 | `internal/` packages | `internal` cannot be imported from outside this module — a language-level way to keep these packages private | every `import "simpleagent/internal/..."` in `main.go` |
 | Errors as values | No exceptions: functions return an `error`; callers check it. `fmt.Errorf("…: %w", err)` wraps an error to add context | `config.go:172`, `main.go:53` pattern |
-| `defer` | "Run this when the function returns" — cleanup written next to the resource | `auditLog.Close()` in `main.go`; `defer f.Close()` in `fs.go:305` (`readRanged`) |
+| `defer` | "Run this when the function returns" — cleanup written next to the resource | `auditLog.Close()` in `main.go`; `defer f.Close()` in `fs.go:317` (`readRanged`) |
 | Pointers `*T` | A pointer stores a memory address; methods taking a pointer receiver (`func (e *Engine)`) can mutate the struct | `engine.go:221` `RunTurn` |
 | `&x` and why `Content *string` | The chat API omits absent fields; `nil` pointer → field omitted (`types.go:23`); `TextMessage` copies its param to take its address (`types.go:47`) |
 | Interfaces | A set of method signatures; any type implementing them satisfies the interface. `agent.UI` is implemented by `repl.TextUI` | `engine.go:33` + `ui.go:24` |
@@ -213,9 +215,9 @@ what the concept is and where to see it first.
 | `json.RawMessage` | Keep raw JSON bytes undecoded until needed | `decodeArgs` `tools.go:120` |
 | `bufio.Scanner` | Read a stream line by line | SSE parsing `client.go:60` |
 | Build tags | `//go:build windows` keeps a file in the build only on Windows | `proc_windows.go:1`, `console_other.go:1` |
-| Closures | Functions defined inline that capture surrounding variables (also used for recursive walking via `var walk func…`) | `listRecursive` `fs.go:146`, `onLine` `client.go:60` |
+| Closures | Functions defined inline that capture surrounding variables (also used for recursive walking via `var walk func…`) | `listRecursive` `fs.go:153`, `onLine` `client.go:60` |
 | `strings.Builder` | Efficiently assemble a big string piece by piece | everywhere in `fs.go` listings |
-| Sentinel errors | Predefined errors compared with `errors.Is`, so behavior ≠ "string match" | `paths.go:24`, `errStopListing` `fs.go:213` |
+| Sentinel errors | Predefined errors compared with `errors.Is`, so behavior ≠ "string match" | `paths.go:24`, `errStopListing` `fs.go:225` |
 | `map[string]struct{}` | A set: only the keys matter, values cost nothing | `approvals.go:50` (ruleSet `exact` map) |
 
 ---
@@ -233,6 +235,7 @@ what the concept is and where to see it first.
 | audit | `.agent/audit.jsonl`: one JSON line per *event*, written for accountability |
 | sandbox | The confinement layer: `Root.Resolve` (paths) + capped file tools + safe exec |
 | `.agent` | The harness state directory inside the project root — invisible to and protected from the model |
+| protected file | Harness-owned file registered via `Root.Protect` (the loaded config and `<root>/simpleagent.json`): `Resolve` refuses it — even for creation — symlinks onto it are rejected, listings tag it `(harness config, protected)` and search/recursive listings skip it |
 | tail | The last N bytes of command output kept for the model (`exec.go:55`) |
 | truncation | What happens when output exceeds a cap — flagged, never silently dropped without a marker |
 

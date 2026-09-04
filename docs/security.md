@@ -35,6 +35,15 @@ Every file op goes through `sandbox.Root.Resolve` (`internal/sandbox/paths.go`):
   symlink to a target that gets created elsewhere" escape.
 - `.agent/` (harness state) is protected: no read or write through the file
   tools, and it is hidden from listings and skipped by search.
+- **Harness config is protected too:** `Root.Protect` registers the loaded
+  config file (`--config`) and `<root>/simpleagent.json` — the latter even
+  when it does not exist yet, so the agent cannot *create* a config that a
+  later launch would auto-load. Resolve refuses protected paths before any
+  filesystem access, symlinks resolving onto them are rejected, flat
+  listings tag them `(harness config, protected)`, and recursive listings
+  and search skip them. The model therefore cannot rewrite its own
+  allowlist/denylist/model endpoint or inspect the config through the file
+  tools.
 
 ### 2. Shell command execution (`run_command`)
 

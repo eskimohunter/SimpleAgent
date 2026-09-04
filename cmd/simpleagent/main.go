@@ -76,6 +76,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The agent must never be able to edit its own harness config: protect
+	// the conventional <root>/simpleagent.json (even if it does not exist
+	// yet - otherwise the agent could plant one for the next launch) and
+	// the file actually loaded via --config, when it lives inside the root.
+	root.Protect(filepath.Join(root.Abs(), "simpleagent.json"))
+	if cfg.ConfigPath != "" {
+		root.Protect(cfg.ConfigPath)
+	}
 	// Prepare the harness state directory. "tmp" becomes the TEMP/TMP for
 	// shell commands (scratch files never pollute the project), "sessions"
 	// holds one JSONL file per conversation, and the audit log lives directly

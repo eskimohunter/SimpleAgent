@@ -130,6 +130,13 @@ func (s *Sandbox) listFlat(dirAbs, relBase string) (string, error) {
 			b.WriteString("dir  " + joinSlash(relBase, e.Name()) + "/   (harness state, protected)\n")
 			continue
 		}
+		entryAbs := filepath.Join(dirAbs, e.Name())
+		if s.root.isProtected(entryAbs) {
+			// Harness config file: visible so the layout makes sense, but
+			// tagged and off-limits (Resolve refuses it regardless).
+			b.WriteString("file " + joinSlash(relBase, e.Name()) + "   (harness config, protected)\n")
+			continue
+		}
 		fi, err := e.Info()
 		if err != nil {
 			continue
@@ -158,6 +165,11 @@ func (s *Sandbox) listRecursive(dirAbs, relBase string, maxEntries int) (string,
 		}
 		for _, e := range ents {
 			if isHiddenState(e.Name()) {
+				continue
+			}
+			entryAbs := filepath.Join(dirAbs, e.Name())
+			if s.root.isProtected(entryAbs) {
+				// Harness config file: omitted entirely from recursive trees.
 				continue
 			}
 			fi, err := e.Info()
@@ -465,6 +477,10 @@ func (s *Sandbox) Search(pattern, include string, maxResults int) (string, error
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if s.root.isProtected(p) {
+			// Harness config file: never searched.
 			return nil
 		}
 		if d.IsDir() {
