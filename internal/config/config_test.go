@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +73,89 @@ func TestAPIKeyEnv(t *testing.T) {
 	t.Setenv("AGENT_TEST_KEY_ENV", "sekrit")
 	if m.APIKey() != "sekrit" {
 		t.Fatal("env key lookup failed")
+	}
+}
+
+func remoteDefaults(t *testing.T) Config {
+	t.Helper()
+	c := Defaults()
+	c.Root = "/tmp/x"
+	c.Mock = false
+	c.Model.BaseURL = "https://api.openrouter.ai/api/v1"
+	c.Model.Model = "m"
+	return c
+}
+
+func TestAPIKeyEnvPastedSecretFails(t *testing.T) {
+	c := remoteDefaults(t)
+	c.Model.APIKeyEnv = "sk-or-v1-abc-123"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "NAME of an environment variable") {
+		t.Fatalf("expected env-name error, got %v", err)
+	}
+}
+
+func TestRemoteHTTPSMissingKeyFails(t *testing.T) {
+	c := remoteDefaults(t)
+	c.Model.APIKeyEnv = "AGENT_MISSING_KEY_UNIQUE"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "environment variable is empty") {
+		t.Fatalf("expected missing-key error, got %v", err)
+	}
+}
+
+func TestRemoteHTTPSKeyPresentOK(t *testing.T) {
+	c := remoteDefaults(t)
+	t.Setenv("AGENT_PRESENT_KEY_UNIQUE", "sk-xyz")
+	c.Model.APIKeyEnv = "AGENT_PRESENT_KEY_UNIQUE"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRemoteHTTPSExplicitNoKeyOK(t *testing.T) {
+	c := remoteDefaults(t)
+	c.Model.APIKeyEnv = ""
+	if err := c.Validate(); err != nil {
+		t.Fatalf("explicit no-key opt-out should pass: %v", err)
+	}
+}
+
+func TestLoopbackHTTPSNoKeyOK(t *testing.T) {
+	c := remoteDefaults(t)
+	c.Model.BaseURL = "https://localhost:8443/v1"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("loopback https should not require a key: %v", err)
+	}
+	c.Model.BaseURL = "https://127.0.0.1:8443/v1"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("loopback https should not require a key: %v", err)
+	}
+}
+
+func TestPrivateLANHTTPNoKeyOK(t *testing.T) {
+	c := remoteDefaults(t)
+	c.Model.BaseURL = "http://192.168.1.50:8000/v1"
+	c.Model.APIKeyEnv = "AGENT_LAN_KEY"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("private-LAN http should not require a key: %v", err)
+	}
+	c.Model.APIKeyEnv = "AGENT_LAN_KEY"
+	t.Setenv("AGENT_LAN_KEY", "sekrit")
+	if err := c.Validate(); err != nil {
+		t.Fatalf("private-LAN http with key should pass: %v", err)
+	}
+}
+
+func TestMockSkipsKeyChecks(t *testing.T) {
+	c := Defaults()
+	c.Root = "/tmp/x"
+	c.Mock = true
+	c.Model.BaseURL = ""
+	c.Model.Model = ""
+	c.Model.APIKeyEnv = "sk-or-v1-pasted"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("mock mode must not require model config: %v", err)
 	}
 }
 

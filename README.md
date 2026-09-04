@@ -28,6 +28,38 @@ Run on Windows 11 — no install needed:
 simpleagent.exe --root C:\path\to\your\project
 ```
 
+### Set the API key and run against your model
+
+The harness reads the key from an environment variable (named by
+`api_key_env` in the config, `AGENT_API_KEY` by default) — the key itself
+never goes into `simpleagent.json`.
+
+Windows 11 (PowerShell):
+
+```powershell
+$env:AGENT_API_KEY = "sk-or-v1-..."
+.\simpleagent.exe --root C:\path\to\your\project
+```
+
+Windows 11 (Command Prompt):
+
+```bat
+set AGENT_API_KEY=sk-or-v1-...
+simpleagent.exe --root C:\path\to\your\project
+```
+
+Linux:
+
+```sh
+export AGENT_API_KEY="sk-or-v1-..."
+./simpleagent --root /path/to/project
+```
+
+The variable lasts for the current terminal session only; to make it
+persistent on Windows use `setx AGENT_API_KEY sk-or-v1-...` (takes effect in
+new terminals). If your endpoint needs no key (e.g. an unauthenticated LAN
+server), set `"api_key_env": ""` in the config.
+
 First run creates the harness state directory inside your project:
 
 ```
@@ -44,8 +76,9 @@ First run creates the harness state directory inside your project:
 simpleagent.exe --mock --root C:\path\to\your\project
 ```
 
-`--mock` runs a built-in scripted model server on 127.0.0.1 — useful to verify
-the harness works before you point it at a real model.
+(same on Linux: `./simpleagent --mock --root /path/to/project`) —
+`--mock` runs a built-in scripted model server on 127.0.0.1, useful to verify
+the harness works before you point it at a real model. No API key needed.
 
 ## Configuration
 
@@ -89,8 +122,13 @@ uses built-in per-OS defaults when `command`/`args` are omitted.
 ```
 
 Environment overrides: `AGENT_BASE_URL`, `AGENT_MODEL`, `AGENT_TEMPERATURE`.
-The API key is read from the env var named by `api_key_env` — never put it in
-the config file. Do not commit `simpleagent.json` if it contains LAN details.
+The API key is read from the env var named by `api_key_env` — that field must
+be the variable's *name*, never the key itself, and the key never goes in the
+config file. The harness refuses to start if `api_key_env` holds something
+that cannot be an environment variable name, or if the named variable is empty
+when talking to a remote `https` endpoint (set `api_key_env` to `""` if that
+endpoint genuinely needs no key). Do not commit `simpleagent.json` if it
+contains LAN details.
 
 The model server must expose the OpenAI-compatible `/v1/chat/completions`
 endpoint **with tool calling support** (vLLM, Ollama, LM Studio, llama.cpp

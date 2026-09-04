@@ -4,10 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 )
 
 type ModelConfig struct {
@@ -127,6 +131,9 @@ func (c *Config) Validate() error {
 		if c.Model.Model == "" {
 			return errors.New("model.model is required (set it in simpleagent.json or AGENT_MODEL)")
 		}
+		if err := c.checkAPIKey(); err != nil {
+			return err
+		}
 	}
 	if c.Model.Temperature < 0 || c.Model.Temperature > 2 {
 		return errors.New("model.temperature must be within [0,2]")
@@ -233,4 +240,42 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func envNameRe() *regexp.Regexp {
+	return regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+}
+
+func (c *Config) checkAPIKey() error {
+	if c.Model.APIKeyEnv == "" {
+		return nil
+	}
+	if !envNameRe().MatchString(c.Model.APIKeyEnv) {
+		return fmt.Errorf("model.api_key_env %q must be the NAME of an environment variable holding the key (e.g. \"AGENT_API_KEY\"), not the key itself", c.Model.APIKeyEnv)
+	}
+	if c.Mock {
+		return nil
+	}
+	u, err := url.Parse(c.Model.BaseURL)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("model.base_url %q is not a valid URL", c.Model.BaseURL)
+	}
+	if strings.EqualFold(u.Scheme, "https") && !isLoopbackHost(u.Host) && c.Model.APIKey() == "" {
+		return fmt.Errorf("model.api_key_env %q is set but the environment variable is empty; export the key before starting (set api_key_env to \"\" if this endpoint genuinely needs no key)", c.Model.APIKeyEnv)
+	}
+	return nil
+}
+
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
