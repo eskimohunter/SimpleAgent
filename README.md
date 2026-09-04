@@ -50,7 +50,13 @@ the harness works before you point it at a real model.
 ## Configuration
 
 Config file: `simpleagent.json` in the project root (or pass `--config`).
-All values optional; defaults shown.
+Start from `simpleagent.json.example` in this repository, copy it to the
+project root and edit. Shown values match the built-in defaults except:
+`model.base_url` and `model.model` are placeholders and are required unless
+you run with `--mock`; the `approvals.allowlist` entries are recommendations,
+not defaults — commands matching them run **without** an approval prompt, so
+curate that list. The shell (`powershell.exe` on Windows, `sh` elsewhere)
+uses built-in per-OS defaults when `command`/`args` are omitted.
 
 ```json
 {
