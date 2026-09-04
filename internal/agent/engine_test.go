@@ -65,10 +65,11 @@ func testEngine(t *testing.T, brain mock.Brain, deny bool) (*Engine, *fakeUI, *s
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditLog, err := audit.New(dir + "/audit.jsonl")
+	auditLog, err := audit.New(filepath.Join(dir, "audit.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = auditLog.Close() })
 	ui := &fakeUI{denyAll: deny}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
 	eng := New(cfg, client, sbx, allow, auditLog, ui, "test-session")
@@ -195,7 +196,8 @@ func TestAutoAllowFromAllowlistSkipsPrompt(t *testing.T) {
 	cfg.Model.BaseURL = "http://" + srv.Addr() + "/v1"
 	allow, _ := approvals.New("", false, []string{"git status"})
 	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
-	auditLog, _ := audit.New(dir + "/audit.jsonl")
+	auditLog, _ := audit.New(filepath.Join(dir, "audit.jsonl"))
+	defer auditLog.Close()
 	ui := &fakeUI{}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
 	eng := New(cfg, client, sbx, allow, auditLog, ui, "s")
@@ -241,7 +243,8 @@ func TestRollbackOnModelFailure(t *testing.T) {
 	cfg.Model.BaseURL = "http://127.0.0.1:1/v1"
 	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
 	allow, _ := approvals.New("", false, nil)
-	auditLog, _ := audit.New(dir + "/audit.jsonl")
+	auditLog, _ := audit.New(filepath.Join(dir, "audit.jsonl"))
+	defer auditLog.Close()
 	ui := &fakeUI{}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 2*time.Second)
 	eng := New(cfg, client, sbx, allow, auditLog, ui, "s")
