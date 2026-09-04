@@ -79,7 +79,6 @@ func (r *REPL) Run() error {
 				turnCancel = nil
 				c()
 			} else {
-				fmt.Fprintln(os.Stdout, "\nbye")
 				os.Exit(0)
 			}
 		}
