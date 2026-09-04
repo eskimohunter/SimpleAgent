@@ -12,6 +12,7 @@
 package repl
 
 import (
+	"errors"
 	"os"
 	"syscall"
 	"unsafe"
@@ -20,6 +21,13 @@ import (
 const (
 	enableVirtualTerminalProcessing = 0x0004
 	stdOutputHandle                 = ^uintptr(10)
+	stdInputHandle                  = ^uintptr(9)
+
+	// Console input modes cleared by enterRawMode so each key press is
+	// delivered immediately instead of being line-buffered and echoed.
+	enableProcessedInput = 0x0001 // Ctrl+C handled by the system (off = we see it as a byte)
+	enableLineInput      = 0x0002 // Enter delivers the whole line (off = per key)
+	enableEchoInput      = 0x0004 // system echo (off = we echo ourselves)
 )
 
 func configureConsole() {
@@ -48,4 +56,32 @@ func configureConsole() {
 		return
 	}
 	_, _, _ = procSetMode.Call(h, uintptr(mode|enableVirtualTerminalProcessing))
+}
+
+// enterRawMode switches the console input to character mode (no line
+// buffering, no echo, no system Ctrl+C processing) so the REPL can read
+// single keys such as Tab. Returns a function restoring the previous mode.
+func enterRawMode() (func(), error) {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	procGetHandle := kernel32.NewProc("GetStdHandle")
+	procGetMode := kernel32.NewProc("GetConsoleMode")
+	procSetMode := kernel32.NewProc("SetConsoleMode")
+
+	// GetStdHandle(STD_INPUT_HANDLE = -10, i.e. ^uintptr(9)).
+	h, _, _ := procGetHandle.Call(stdInputHandle)
+	if h == 0 || h == ^uintptr(0) {
+		return nil, errors.New("no console input handle")
+	}
+	var old uint32
+	ret, _, _ := procGetMode.Call(h, uintptr(unsafe.Pointer(&old)))
+	if ret == 0 {
+		return nil, errors.New("GetConsoleMode failed")
+	}
+	raw := old &^ (enableProcessedInput | enableLineInput | enableEchoInput)
+	if _, _, err := procSetMode.Call(h, uintptr(raw)); err != nil {
+		return nil, err
+	}
+	return func() {
+		_, _, _ = procSetMode.Call(h, uintptr(old))
+	}, nil
 }

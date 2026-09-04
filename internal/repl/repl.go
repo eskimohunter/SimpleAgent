@@ -85,9 +85,20 @@ func (r *REPL) Run() error {
 	}()
 
 	for {
-		r.ui.write(r.ui.paint("1;32", "user> "))
-		line, err := r.ui.ReadUserLine()
+		var line string
+		var err error
+		if r.ui.Interactive() {
+			// Real terminal: raw-mode input so Tab toggles plan/build mode
+			// instantly while the prompt is being typed.
+			line, err = r.ui.ReadUserInteractive(r.prompt, r.toggleMode)
+		} else {
+			// Piped input (CI smoke tests etc.): cooked lines only; use the
+			// /mode command to switch.
+			r.ui.write(r.prompt())
+			line, err = r.ui.ReadUserLine()
+		}
 		if err != nil {
+			// EOF, read errors and Ctrl+C at the prompt all end the REPL.
 			return nil
 		}
 		line = strings.TrimSpace(line)
@@ -121,6 +132,26 @@ func (r *REPL) Run() error {
 	}
 }
 
+// prompt returns the painted prompt for the current mode: green "user> " in
+// build mode, yellow "plan> " in plan mode.
+func (r *REPL) prompt() string {
+	if r.engine.Mode() == agent.ModePlan {
+		return r.ui.paint("1;33", "plan> ")
+	}
+	return r.ui.paint("1;32", "user> ")
+}
+
+// toggleMode flips plan/build mode and tells the user what changed.
+func (r *REPL) toggleMode() {
+	if r.engine.Mode() == agent.ModePlan {
+		r.engine.SetMode(agent.ModeBuild)
+		r.ui.Info("build mode: full file and command access. (Tab toggles plan mode)")
+	} else {
+		r.engine.SetMode(agent.ModePlan)
+		r.ui.Info("plan mode: read-only. File writes and non-allowlisted commands are blocked. (Tab toggles build mode)")
+	}
+}
+
 // banner prints the startup summary: version, project root, the model
 // endpoint (credentials masked, or "mock" in demo mode) and state dir.
 func (r *REPL) banner() {
@@ -132,6 +163,11 @@ func (r *REPL) banner() {
 	r.ui.Info(fmt.Sprintf("  project root : %s", r.cfg.Root))
 	r.ui.Info(fmt.Sprintf("  model        : %s", ep))
 	r.ui.Info(fmt.Sprintf("  state        : %s", r.stateDir))
+	if r.ui.Interactive() {
+		r.ui.Info("  mode         : build (Tab toggles plan mode)")
+	} else {
+		r.ui.Info("  mode         : build (/mode toggles plan mode)")
+	}
 	r.ui.Info("  shell commands need your approval. type /help for commands.")
 }
 
@@ -147,7 +183,11 @@ func (r *REPL) handleCommand(line string) (bool, error) {
   /help       this help
   /new        clear conversation history (starts a new session file)
   /approvals  show approval rules (allowlist + denylist)
+  /mode       show the current mode (plan/build); /mode plan or /mode build switches
   /exit       quit`)
+		return false, nil
+	case "/mode":
+		r.handleMode(parts)
 		return false, nil
 	case "/new":
 		// Reset the engine's in-memory history and rotate to a fresh
@@ -193,5 +233,32 @@ func (r *REPL) handleCommand(line string) (bool, error) {
 	default:
 		r.ui.Error("unknown command: " + cmd + "  (try /help)")
 		return false, nil
+	}
+}
+
+// handleMode implements /mode: no argument prints the current mode, an
+// argument of "plan" or "build" switches to it (via the same path the Tab
+// toggle uses, including the audit event).
+func (r *REPL) handleMode(parts []string) {
+	want := ""
+	if len(parts) > 1 {
+		want = strings.ToLower(parts[1])
+	}
+	switch want {
+	case "", "?":
+		r.ui.Info("current mode: " + r.engine.Mode().String())
+	case "plan", "build":
+		m := agent.ModeBuild
+		if want == "plan" {
+			m = agent.ModePlan
+		}
+		if r.engine.Mode() != m {
+			r.engine.SetMode(m)
+			r.ui.Info("switched to " + want + " mode.")
+		} else {
+			r.ui.Info("already in " + want + " mode.")
+		}
+	default:
+		r.ui.Error(`usage: /mode [plan|build]  (Tab also toggles the mode)`)
 	}
 }

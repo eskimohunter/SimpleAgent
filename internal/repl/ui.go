@@ -3,6 +3,7 @@ package repl
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,10 @@ import (
 
 	"simpleagent/internal/approvals"
 )
+
+// errUserQuit is returned by the interactive reader when the user presses
+// Ctrl+C at the idle prompt (mirrors the cooked-mode signal behavior).
+var errUserQuit = errors.New("user quit")
 
 // TextUI renders the console: prompts, streaming model output, tool notices,
 // command output and approval prompts. It is the production implementation
@@ -27,6 +32,7 @@ type TextUI struct {
 	out       io.Writer
 	color     bool
 	streaming bool
+	tty       bool // both stdin and stdout are terminals (raw Tab input works)
 }
 
 // NewTextUI wraps an input reader and output writer. When writing to a real
@@ -37,10 +43,22 @@ func NewTextUI(in io.Reader, out io.Writer) *TextUI {
 		configureConsole()
 	}
 	color := false
-	if f, ok := out.(*os.File); ok && isTTY(f) && os.Getenv("NO_COLOR") == "" {
-		color = true
+	tty := false
+	if f, ok := out.(*os.File); ok {
+		color = isTTY(f) && os.Getenv("NO_COLOR") == ""
 	}
-	return &TextUI{in: bufio.NewReader(in), out: out, color: color}
+	if f, ok := in.(*os.File); ok && isTTY(f) {
+		if of, ok := out.(*os.File); ok && isTTY(of) {
+			tty = true
+		}
+	}
+	return &TextUI{in: bufio.NewReader(in), out: out, color: color, tty: tty}
+}
+
+// Interactive reports whether input comes from a real terminal (raw-mode
+// key handling such as the Tab toggle is only possible then).
+func (u *TextUI) Interactive() bool {
+	return u.tty
 }
 
 // isTTY reports whether f is a character device (a terminal). Piped output
@@ -217,5 +235,151 @@ func (u *TextUI) ReadUserLine() (string, error) {
 		}
 		sb.WriteString(line)
 		return sb.String(), nil
+	}
+}
+
+// ReadUserInteractive reads one logical user message from a TTY in raw
+// (character) mode. While typing: a Tab at the empty prompt calls onTab
+// (the mode toggle), printable characters echo, Backspace erases, Enter
+// submits, and Ctrl+C returns errUserQuit (the caller exits). Lines joined
+// with a trailing "\" or pasted in one burst are merged like ReadUserLine.
+// prompt is called for every redraw so the visible prefix follows mode
+// toggles immediately.
+func (u *TextUI) ReadUserInteractive(prompt func() string, onTab func()) (string, error) {
+	u.FinishStream()
+	restore, err := enterRawMode()
+	if err != nil {
+		// Raw input unavailable (unsupported platform, not a console):
+		// degrade to the cooked reader on a fresh line.
+		fmt.Fprintln(u.out)
+		return u.ReadUserLine()
+	}
+	defer restore()
+	return u.readRawLines(prompt, onTab)
+}
+
+// readRawLines drives the character-mode input loop and merges continuation
+// and pasted lines into one logical message (same rules as ReadUserLine).
+func (u *TextUI) readRawLines(prompt func() string, onTab func()) (string, error) {
+	var sb strings.Builder
+	for {
+		line, err := u.readRawLine(prompt, onTab)
+		if err != nil {
+			if err == io.EOF && sb.Len() > 0 {
+				return sb.String(), nil
+			}
+			if err == errUserQuit {
+				return "", err
+			}
+			return sb.String(), err
+		}
+		joined := false
+		if strings.HasSuffix(line, "\\") {
+			sb.WriteString(strings.TrimSuffix(line, "\\"))
+			sb.WriteString("\n")
+			joined = true
+		} else {
+			sb.WriteString(line)
+		}
+		// Paste heuristic: more input already buffered behind the Enter key
+		// means the user pasted several lines; treat them as one message.
+		if u.in.Buffered() > 0 {
+			sb.WriteString("\n")
+			joined = true
+		}
+		if joined {
+			fmt.Fprintln(u.out)
+			continue
+		}
+		return sb.String(), nil
+	}
+}
+
+// readRawLine reads one physical line in raw mode, echoing keys itself. The
+// prompt is drawn first and redrawn after Tab toggles. A Tab toggles the
+// mode only when pressed at the empty prompt with nothing buffered (a real
+// keystroke, not paste); anywhere else it is literal text, so pasting
+// tab-indented code can never flip the mode or drop the draft.
+func (u *TextUI) readRawLine(prompt func() string, onTab func()) (string, error) {
+	draft := []rune{}
+	draw := func() {
+		line := prompt() + string(draft)
+		if u.color {
+			// ANSI erase-to-end-of-line; VT processing is enabled exactly
+			// when colors are on.
+			fmt.Fprintf(u.out, "\r\x1b[K%s", line)
+		} else {
+			// No ANSI (NO_COLOR / legacy console): overwrite the line with
+			// spaces instead of emitting escape codes.
+			fmt.Fprintf(u.out, "\r%s\r%s", strings.Repeat(" ", len(line)), line)
+		}
+	}
+	draw()
+	for {
+		r, _, err := u.in.ReadRune()
+		if err != nil {
+			return string(draft), err
+		}
+		switch r {
+		case '\t':
+			if len(draft) == 0 && u.in.Buffered() == 0 {
+				// A genuine Tab keystroke at the empty prompt toggles the
+				// mode. Tabs typed or pasted into a message (mid-line, or
+				// any tab while input is still streaming in) are content.
+				if onTab != nil {
+					onTab()
+				}
+				draw()
+			} else {
+				draft = append(draft, r)
+				u.write(string(r))
+			}
+		case '\r', '\n':
+			fmt.Fprintln(u.out)
+			return string(draft), nil
+		case 0x7f, '\b':
+			if len(draft) > 0 {
+				draft = draft[:len(draft)-1]
+				draw()
+			}
+		case 0x03:
+			// Ctrl+C reached us as a byte because raw mode disabled the
+			// terminal's signal processing. Same meaning as at the idle
+			// cooked prompt: quit.
+			return "", errUserQuit
+		case 0x1b:
+			// Escape: swallow a real escape sequence (CSI/SS3) so its bytes
+			// are neither echoed nor typed. A lone Escape is put back and
+			// discarded harmlessly on the next read: nothing is swallowed
+			// that the user typed deliberately.
+			next, _, rerr := u.in.ReadRune()
+			if rerr != nil {
+				return string(draft), rerr
+			}
+			switch next {
+			case '[': // CSI: ESC [ ... final byte 0x40-0x7e
+				for i := 0; i < 16; i++ {
+					final, _, rerr := u.in.ReadRune()
+					if rerr != nil {
+						return string(draft), rerr
+					}
+					if final >= 0x40 && final <= 0x7e {
+						break
+					}
+				}
+			case 'O': // SS3 (F1-F4): ESC O P
+				_, _, _ = u.in.ReadRune()
+			default:
+				// Not a sequence: put the rune back so it reaches the
+				// draft on the next iteration (lone Escape is dropped).
+				_ = u.in.UnreadRune()
+			}
+		default:
+			if r >= ' ' {
+				draft = append(draft, r)
+				u.write(string(r))
+			}
+			// Other control characters are ignored without echo.
+		}
 	}
 }

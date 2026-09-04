@@ -100,6 +100,23 @@ func AllTools() []model.Tool {
 	return tools
 }
 
+// toolsForMode returns the tool list for the current mode: build advertises
+// everything, plan hides write_file and run_command (they are still refused
+// at dispatch as defense in depth, even if the model tries them anyway).
+func toolsForMode(plan bool) []model.Tool {
+	if !plan {
+		return AllTools()
+	}
+	tools := make([]model.Tool, 0, len(fileTools)-1)
+	for _, t := range fileTools {
+		if t.Function.Name == "write_file" {
+			continue
+		}
+		tools = append(tools, t)
+	}
+	return tools
+}
+
 // IsFileTool reports whether name is one of the sandbox-confined file tools.
 // The engine uses this to count file operations separately from commands and
 // to route dispatch correctly.

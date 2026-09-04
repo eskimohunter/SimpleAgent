@@ -37,6 +37,23 @@ type UI interface {
 	ApproveCommand(ctx context.Context, cmd string) (approvals.Decision, error)
 }
 
+// Mode is the interactive working mode of the engine, toggled by the user
+// with Tab at the prompt (or the /mode command).
+type Mode int
+
+const (
+	ModeBuild Mode = iota // default: full file + command access
+	ModePlan              // read-only: no file writes, only allowlisted commands
+)
+
+// String names a mode for prompts, banners and the audit log.
+func (m Mode) String() string {
+	if m == ModePlan {
+		return "plan"
+	}
+	return "build"
+}
+
 // TurnSummary aggregates what happened during one user turn, so the REPL and
 // tests can report or assert on activity without parsing the history.
 type TurnSummary struct {
@@ -46,6 +63,7 @@ type TurnSummary struct {
 	FileCalls      int
 	CommandCalls   int
 	DeniedCommands int
+	PlanBlocked    int
 	StopReason     string
 }
 
@@ -67,7 +85,23 @@ type Engine struct {
 	cfg      config.Config
 	system   model.Message
 	messages []model.Message
+	mode     Mode
 	tempDir  string
+}
+
+// Mode returns the current working mode (ModeBuild by default).
+func (e *Engine) Mode() Mode {
+	return e.mode
+}
+
+// SetMode switches the working mode and records the switch in the audit
+// trail. The mode is session state: it survives /new and is never persisted.
+func (e *Engine) SetMode(m Mode) {
+	if e.mode == m {
+		return
+	}
+	e.mode = m
+	e.audit("mode_switch", map[string]any{"mode": m.String()})
 }
 
 // New wires a fresh engine: it snapshots the config the session should obey
@@ -261,6 +295,10 @@ Rules:
 - For inspecting code use search_files and read_file (line-numbered; pass offset/limit to page large files). Keep reads targeted; your context is limited.
 - Use write_file for edits; it overwrites the whole file, so read first when modifying.
 - Keep replies concise and concrete. Mention exact file paths when referring to files.
+
+Modes:
+- Build mode (default): you may modify files and run approved commands.
+- Plan mode: read-only investigation. write_file and run_command are disabled and will NOT run even if requested; a mode note is appended to every request while it is active. Produce a concrete plan and wait for the user to switch to build mode (Tab at the prompt, or /mode build).
 Today's date: %s`, osName, root, shellName, time.Now().Format("2006-01-02 15:04")) + "\n"
 }
 
@@ -364,10 +402,25 @@ func (e *Engine) RunTurn(ctx context.Context, userText string) (sum TurnSummary,
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
+		// The tool list and a mode note reflect the CURRENT mode on every
+		// iteration, so a mid-turn mode change is honored immediately.
+		msgs := e.trimmedSlice()
+		if e.mode == ModePlan {
+			// Ephemeral system note right after the standing system prompt
+			// (never appended to the persisted history): explains why tools
+			// are missing and what to do. Inserting after the first message
+			// keeps the leading system message first for strict backends.
+			note := model.TextMessage("system", "CURRENT MODE: plan. Do NOT modify files and do NOT ask to run commands: write_file and run_command are disabled in this mode. Inspect the project and present a concrete plan; the user switches to build mode (Tab) to execute it.")
+			cp := make([]model.Message, 0, len(msgs)+1)
+			cp = append(cp, msgs[0])
+			cp = append(cp, note)
+			cp = append(cp, msgs[1:]...)
+			msgs = cp
+		}
 		req := model.ChatRequest{
 			Model:       e.cfg.Model.Model,
-			Messages:    e.trimmedSlice(),
-			Tools:       AllTools(),
+			Messages:    msgs,
+			Tools:       toolsForMode(e.mode == ModePlan),
 			Temperature: e.cfg.Model.Temperature,
 		}
 		// Stream the model's words to the UI live as they arrive.
@@ -424,6 +477,16 @@ func (e *Engine) RunTurn(ctx context.Context, userText string) (sum TurnSummary,
 // still information the model should get.
 func (e *Engine) dispatchTool(ctx context.Context, sum *TurnSummary, tc model.ToolCall) string {
 	sum.ToolCalls++
+	// Plan-mode gate for file writes: write_file is refused before the
+	// sandbox is reached, whether or not the model was told it exists.
+	if e.mode == ModePlan && tc.Function.Name == "write_file" {
+		sum.PlanBlocked++
+		e.audit("plan_block", map[string]any{"tool": tc.Function.Name, "call_id": tc.ID})
+		if e.UI != nil {
+			e.UI.Notice("warn", "plan mode blocked a file write")
+		}
+		return "ERROR: plan mode is active: write_file is disabled because it would modify the project. Switch to build mode (Tab) to edit files, or finish planning first."
+	}
 	if e.UI != nil {
 		e.UI.Notice("tool", fmt.Sprintf("%s %s", tc.Function.Name, truncateArgs(tc.Function.Arguments)))
 	}
@@ -559,27 +622,52 @@ func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[
 		timeout = time.Duration(timeoutSec) * time.Second
 	}
 
-	// THE approval gate: denylist block -> allowlist match -> prompt.
-	approved, remember, blocked := e.approveCommand(ctx, cmdline)
-	if blocked {
-		// Hard block by configuration: never runs, never prompts - not even
-		// a human "always" can override it in this session. The model gets
-		// a distinct message so it does not mistake policy for a user
-		// denial and retry the same command.
-		sum.DeniedCommands++
-		e.audit("approval_denied", map[string]any{"command": cmdline, "reason": "denylist"})
-		if e.UI != nil {
-			e.UI.Notice("deny", "blocked (config denylist): "+cmdline)
+	// Gate 1 - config denylist: hard block, checked before anything else.
+	// It wins over the allowlist, over "always" approvals AND over plan
+	// mode, so a blocked command never runs in any mode.
+	if e.Allow != nil {
+		if ok, _ := e.Allow.Denied(cmdline); ok {
+			sum.DeniedCommands++
+			e.audit("approval_denied", map[string]any{"command": cmdline, "reason": "denylist"})
+			if e.UI != nil {
+				e.UI.Notice("deny", "blocked (config denylist): "+cmdline)
+			}
+			return fmt.Sprintf("ERROR: the command %q is on the configuration denylist and was blocked without running. Propose an alternative that does not use it.", cmdline)
 		}
-		return fmt.Sprintf("ERROR: the command %q is on the configuration denylist and was blocked without running. Propose an alternative that does not use it.", cmdline)
 	}
-	if !approved {
-		sum.DeniedCommands++
-		e.audit("approval_denied", map[string]any{"command": cmdline})
-		if e.UI != nil {
-			e.UI.Notice("deny", "denied command: "+cmdline)
+
+	// Gate 2 - mode policy, then the human gate.
+	approved, remember := false, false
+	if e.mode == ModePlan {
+		// Plan mode never prompts: only commands the allowlist would have
+		// auto-approved may run (they are the user's curated read-only-ish
+		// set); everything else is refused and the user must switch to
+		// build mode. Audit the block, count it, and explain to the model.
+		allowed := false
+		if e.Allow != nil {
+			allowed, _ = e.Allow.Allowed(cmdline)
 		}
-		return fmt.Sprintf("The user DENIED this command and it did not run: %q. Propose an alternative or explain why it is not needed.", cmdline)
+		if !allowed {
+			sum.PlanBlocked++
+			e.audit("plan_block", map[string]any{"tool": "run_command", "command": cmdline})
+			if e.UI != nil {
+				e.UI.Notice("warn", "plan mode blocked command: "+cmdline)
+			}
+			return fmt.Sprintf("ERROR: plan mode is active: the command %q is not on the allowlist and did NOT run - plan mode does not prompt for commands. Switch to build mode (Tab) to run it.", cmdline)
+		}
+		approved = true
+	} else {
+		// Build mode: allowlist match or the interactive yes/always/no
+		// prompt (approveCommand also skips the prompt for allowlist hits).
+		approved, remember = e.approveCommand(ctx, cmdline)
+		if !approved {
+			sum.DeniedCommands++
+			e.audit("approval_denied", map[string]any{"command": cmdline})
+			if e.UI != nil {
+				e.UI.Notice("deny", "denied command: "+cmdline)
+			}
+			return fmt.Sprintf("The user DENIED this command and it did not run: %q. Propose an alternative or explain why it is not needed.", cmdline)
+		}
 	}
 	if remember {
 		e.audit("approval_granted", map[string]any{"command": cmdline, "scope": "always"})
@@ -630,43 +718,37 @@ func (e *Engine) runCommandTool(ctx context.Context, sum *TurnSummary, args map[
 	return sandbox.FormatResult(res)
 }
 
-// approveCommand decides whether cmdline may run. Order of checks:
-//  1. config denylist -> hard block: never runs, never prompts, and the
-//     allowlist below is NOT consulted (a deny rule always wins). The
-//     caller gets blocked=true to phrase the result appropriately;
-//  2. configured/persisted allowlist -> run without asking ("once" scope);
-//  3. no UI attached (headless) -> deny, since no human can approve;
-//  4. interactive prompt: yes-once / always / no.
+// approveCommand is the BUILD-mode human gate (plan mode never reaches it -
+// runCommandTool enforces the plan policy first). Denylist handling is the
+// caller's job (Gate 1 in runCommandTool), so the order here is:
+//  1. configured/persisted allowlist -> run without asking ("once" scope);
+//  2. no UI attached (headless) -> deny, since no human can approve;
+//  3. interactive prompt: yes-once / always / no.
 //
 // remember reports whether the user chose "always" so the caller can persist
 // the command (it is also recorded by Remember inside the switch).
-func (e *Engine) approveCommand(ctx context.Context, cmdline string) (approved, remember, blocked bool) {
+func (e *Engine) approveCommand(ctx context.Context, cmdline string) (approved, remember bool) {
 	if e.Allow != nil {
-		// Deny rules are checked first and always win: a blocked command
-		// never runs even if the allowlist would auto-approve it.
-		if ok, _ := e.Allow.Denied(cmdline); ok {
-			return false, false, true
-		}
 		if ok, _ := e.Allow.Allowed(cmdline); ok {
-			return true, false, false
+			return true, false
 		}
 	}
 	if e.UI == nil {
-		return false, false, false
+		return false, false
 	}
 	dec, err := e.UI.ApproveCommand(ctx, cmdline)
 	if err != nil {
-		return false, false, false
+		return false, false
 	}
 	switch dec {
 	case approvals.AllowOnce:
-		return true, false, false
+		return true, false
 	case approvals.AllowAlways:
 		if e.Allow != nil {
 			_ = e.Allow.Remember(cmdline)
 		}
-		return true, true, false
+		return true, true
 	default:
-		return false, false, false
+		return false, false
 	}
 }

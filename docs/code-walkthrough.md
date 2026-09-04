@@ -82,19 +82,25 @@ subtle part of the whole project.
 - `tools.go` declares what the model may call. The descriptions are read by
   the model, so they double as instructions; the enforcement happens in the
   sandbox regardless.
-- `engine.go` is the loop. `RunTurn` (`engine.go:348`) is the most important
+- `engine.go` is the loop. `RunTurn` (`engine.go:386`) is the most important
   function in the program: send history → model answers → dispatch its tool
   calls → feed results back → repeat until it answers in plain text. Read
   also:
-  - `New` (`engine.go:82`) — assembles the system message at index 0 from
+  - `New` (`engine.go:116`) — assembles the system message at index 0 from
     the built-in rules (`buildSystemPrompt`) plus, when configured, the
-    project's own instruction file: `projectInstructions` (`engine.go:130`)
+    project's own instruction file: `projectInstructions` (`engine.go:164`)
     loads `session.system_prompt_file`, else discovers `<root>/AGENTS.md`
     (falling back to `CLAUDE.md`). Files are capped at 64 KiB and the
     content is advisory only — enforcement stays in code;
-  - `trimmedSlice` (`engine.go:290`) — history is capped for the model
+  - the plan/build `Mode` (`engine.go:42`, `Mode()`/`SetMode()`
+    `engine.go:93`) — plan mode blocks `write_file` in `dispatchTool`
+    (`engine.go:474`) and gates `run_command` in `runCommandTool`
+    (`engine.go:595`); the request loop hides write_file/run_command from
+    the advertised tools (`toolsForMode` in tools.go) and appends an
+    ephemeral mode note;
+  - `trimmedSlice` (`engine.go:328`) — history is capped for the model
     context, but never in a way that orphans tool results;
-  - `runCommandTool` (`engine.go:536`) — the approval gate in action;
+  - `runCommandTool` (`engine.go:595`) — the approval gate in action;
   - `dispatchTool`/`runFileTool` — argument decoding and routing.
 
 ### Step 5 — `internal/repl/repl.go` and `ui.go`
@@ -103,7 +109,13 @@ above it is a neat trick (cancel the running turn first, quit on the second
 press). `ui.go`'s `TextUI` implements the `agent.UI` interface
 (`engine.go:34`) — an example of Go interfaces: the engine only knows the
 interface; the REPL provides the concrete console. `ui.go` also shows a
-mutex-guarded writer shared by several goroutines.
+mutex-guarded writer shared by several goroutines. When input is a real
+terminal (`TextUI.Interactive`), the REPL enters raw character mode
+(`enterRawMode` in the `console_*.go` files — termios on Linux,
+`SetConsoleMode` on Windows) and reads keys itself: `ReadUserInteractive`
+(`ui.go:246`) echoes printable keys, handles Backspace, and turns a Tab
+press into the plan/build toggle (`REPL.toggleMode`, `repl.go:145`). Piped
+input skips raw mode entirely; use `/mode` there.
 
 ### Step 6 — `internal/approvals` and `internal/audit`
 Two small, self-contained packages. Approvals answers "may this command run
@@ -158,7 +170,7 @@ approval prompt too.
 you type a message
    │
    ▼
-REPL.Run ──► Engine.RunTurn (engine.go:348)        [repl.go:65]
+REPL.Run ──► Engine.RunTurn (engine.go:386)        [repl.go:65]
    │             │ appends your message to history + audit
    ▼             ▼
         Client.Chat (client.go:60)  ── POST {base_url}/chat/completions
@@ -168,10 +180,10 @@ REPL.Run ──► Engine.RunTurn (engine.go:348)        [repl.go:65]
    ┌── model asked for tool calls? ── no ──► turn done (answer printed)
    │  yes
    ▼
-dispatchTool (engine.go:425)
+dispatchTool (engine.go:474)
    ├── file tool? ─► Sandbox.ReadFile/WriteFile/List/Search
    │                  every path through Root.Resolve → contained, no prompt
-   └── run_command? ─► approveCommand (engine.go:643)
+   └── run_command? ─► approveCommand (engine.go:726)
                         deny rule match?  ─yes─► blocked: never runs,
                         │                  no prompt (hard block)
                         │ no
@@ -189,7 +201,13 @@ dispatchTool (engine.go:425)
 tool result appended to history, sent back to the model ──► loop again
    │
    └── (until: plain-text answer | Ctrl+C | tool-call limit)
-```
+ ```
+
+The chain above is the build-mode flow. In plan mode the same dispatch
+refuses `write_file` outright and short-circuits `run_command` to "allowlist
+match only" — no prompt — so the diagram's deny → allowlist → prompt ladder
+applies to plan mode with the prompt step removed for non-allowlisted
+commands.
 
 Every hop along the way is also mirrored into `.agent/audit.jsonl`
 (events) and the session JSONL (messages), so any single action can be
@@ -207,14 +225,14 @@ what the concept is and where to see it first.
 | `internal/` packages | `internal` cannot be imported from outside this module — a language-level way to keep these packages private | every `import "simpleagent/internal/..."` in `main.go` |
 | Errors as values | No exceptions: functions return an `error`; callers check it. `fmt.Errorf("…: %w", err)` wraps an error to add context | `config.go:172`, `main.go:53` pattern |
 | `defer` | "Run this when the function returns" — cleanup written next to the resource | `auditLog.Close()` in `main.go`; `defer f.Close()` in `fs.go:317` (`readRanged`) |
-| Pointers `*T` | A pointer stores a memory address; methods taking a pointer receiver (`func (e *Engine)`) can mutate the struct | `engine.go:348` `RunTurn` |
+| Pointers `*T` | A pointer stores a memory address; methods taking a pointer receiver (`func (e *Engine)`) can mutate the struct | `engine.go:386` `RunTurn` |
 | `&x` and why `Content *string` | The chat API omits absent fields; `nil` pointer → field omitted (`types.go:23`); `TextMessage` copies its param to take its address (`types.go:47`) |
-| Interfaces | A set of method signatures; any type implementing them satisfies the interface. `agent.UI` is implemented by `repl.TextUI` | `engine.go:34` + `ui.go:24` |
-| `io.Reader`/`io.Writer` | Interfaces for "source of bytes"/"sink of bytes" — `os.Stdout`, files, pipes all satisfy them | `NewTextUI(in io.Reader, out io.Writer)` `ui.go:35` |
+| Interfaces | A set of method signatures; any type implementing them satisfies the interface. `agent.UI` is implemented by `repl.TextUI` | `engine.go:34` + `ui.go:29` |
+| `io.Reader`/`io.Writer` | Interfaces for "source of bytes"/"sink of bytes" — `os.Stdout`, files, pipes all satisfy them | `NewTextUI(in io.Reader, out io.Writer)` `ui.go:41` |
 | Goroutines `go f()` | Run `f` concurrently on another thread | reader goroutines in `exec.go:177` |
-| Channels + `select` | Channels pass values between goroutines; `select` waits on several at once | ctx watcher in `exec.go:177`; approval prompt ctx in `ui.go:159` |
-| `context.Context` | Carries cancellation (Ctrl+C, timeouts) through calls | `RunTurn(ctx, …)` `engine.go:348` |
-| `sync.Mutex` | Serialize access to shared data from several goroutines | `TextUI.mu` (`ui.go:24`), `tailWriter` (`exec.go:55`) |
+| Channels + `select` | Channels pass values between goroutines; `select` waits on several at once | ctx watcher in `exec.go:177`; approval prompt ctx in `ui.go:177` |
+| `context.Context` | Carries cancellation (Ctrl+C, timeouts) through calls | `RunTurn(ctx, …)` `engine.go:386` |
+| `sync.Mutex` | Serialize access to shared data from several goroutines | `TextUI.mu` (`ui.go:29`), `tailWriter` (`exec.go:55`) |
 | `sync.Once` | "Run this exactly once, even if called concurrently" — the kill race | `exec.go:177` |
 | `sync.WaitGroup` | Wait until N goroutines finish | `exec.go:177` |
 | JSON struct tags | `` `json:"name"` `` maps a field to a JSON key; `omitempty` skips empty values | every struct in `types.go` |

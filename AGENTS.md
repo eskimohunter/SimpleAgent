@@ -27,6 +27,11 @@ Linux; CI (`.github/workflows/ci.yml`) runs Linux and Windows jobs.
     case-insensitive, hard-blocks, checked first and wins over allowlist
     and human "always". `approvals.New` takes `(storeFile, persist,
     allowlist, denylist)`.
+  - Plan/build modes (Tab at the prompt, `/mode`, or `Engine.SetMode`):
+    plan mode blocks `write_file` at dispatch and runs `run_command` only
+    when allowlisted (no prompt); the engine advertises a reduced tool list
+    and an ephemeral mode note per request. Enforcement order in
+    `runCommandTool`: denylist -> mode policy -> prompt.
 - Platform-paired files via build tags (`proc_unix.go`/`proc_windows.go`,
   `console_other.go`/`console_windows.go`), plus `runtime.GOOS == "windows"`
   branches in `paths.go`. Edits there must be verified with a Windows

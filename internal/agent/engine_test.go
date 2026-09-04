@@ -367,8 +367,10 @@ func TestDenylistCaseInsensitiveMatch(t *testing.T) {
 // buildEngine creates the full engine wiring (mock server, approvals, audit,
 // fake UI) against a fresh temp project root, runs cfgFn to customize the
 // config and/or write files into cfg.Root, and returns the engine or the
-// New error. Success tests must check the error themselves.
-func buildEngine(t *testing.T, brain mock.Brain, cfgFn func(*config.Config)) (*Engine, *fakeUI, error) {
+// New error. Success tests must check the error themselves. allowRules, when
+// given, are installed as the approvals allowlist (deny rules are configured
+// manually by the few tests that need them).
+func buildEngine(t *testing.T, brain mock.Brain, cfgFn func(*config.Config), allowRules ...string) (*Engine, *fakeUI, error) {
 	t.Helper()
 	dir := t.TempDir()
 	root, err := sandbox.NewRoot(dir)
@@ -388,7 +390,7 @@ func buildEngine(t *testing.T, brain mock.Brain, cfgFn func(*config.Config)) (*E
 		cfgFn(&cfg)
 	}
 	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
-	allow, err := approvals.New("", false, nil, nil)
+	allow, err := approvals.New("", false, allowRules, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,6 +649,228 @@ func TestSystemPromptUnreadableAGENTSFallsBackToCLAUDE(t *testing.T) {
 	if strings.Contains(sys, "UNREADABLE-MARKER") {
 		t.Fatal("unreadable AGENTS.md content must not be injected")
 	}
+}
+
+func TestPlanModeBlocksWrite(t *testing.T) {
+	var saw string
+	toolSeen := false
+	brain := func(msgs []model.Message) model.Reply {
+		for _, m := range msgs {
+			if m.Role == "tool" {
+				toolSeen = true
+				saw = stringOf(m)
+			}
+		}
+		if toolSeen {
+			return model.Reply{Content: "ok, noted."}
+		}
+		return model.Reply{
+			ToolCalls: []model.ToolCall{{ID: "w1", Type: "function", Function: model.FunctionCall{
+				Name: "write_file", Arguments: `{"path": "victim.txt", "content": "x"}`}}},
+		}
+	}
+	eng, ui, _ := mustBuild(t, brain, nil)
+	eng.SetMode(ModePlan)
+	sum, err := eng.RunTurn(context.Background(), "write a file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.PlanBlocked != 1 || sum.FileCalls != 0 {
+		t.Fatalf("plan write must be counted as blocked, not executed: %+v", sum)
+	}
+	if !strings.Contains(saw, "plan mode") {
+		t.Fatalf("tool result must explain the plan block: %q", saw)
+	}
+	if _, err := readRootFile(t, eng.Sbx, "victim.txt"); err == nil {
+		t.Fatal("file must not exist after a plan-mode write attempt")
+	}
+	if len(ui.approvals) != 0 {
+		t.Fatal("file tools never prompt")
+	}
+}
+
+func TestPlanModeBlocksCommandWithoutPrompt(t *testing.T) {
+	var saw string
+	toolSeen := false
+	brain := func(msgs []model.Message) model.Reply {
+		for _, m := range msgs {
+			if m.Role == "tool" {
+				toolSeen = true
+				saw = stringOf(m)
+			}
+		}
+		if toolSeen {
+			return model.Reply{Content: "understood."}
+		}
+		return model.Reply{
+			ToolCalls: []model.ToolCall{{ID: "c1", Type: "function", Function: model.FunctionCall{
+				Name: "run_command", Arguments: `{"command": "echo side-effect"}`}}},
+		}
+	}
+	eng, ui, _ := mustBuild(t, brain, nil)
+	eng.SetMode(ModePlan)
+	sum, err := eng.RunTurn(context.Background(), "run something")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.PlanBlocked != 1 || sum.DeniedCommands != 0 {
+		t.Fatalf("counters: %+v", sum)
+	}
+	if sum.CommandCalls != 1 {
+		t.Fatalf("the attempt itself must be counted: %+v", sum)
+	}
+	if len(ui.approvals) != 0 {
+		t.Fatalf("plan mode must not prompt: %v", ui.approvals)
+	}
+	if !strings.Contains(saw, "plan mode") {
+		t.Fatalf("tool result must explain the plan block: %q", saw)
+	}
+}
+
+func TestPlanModeRunsAllowlistedCommand(t *testing.T) {
+	var saw string
+	toolSeen := false
+	brain := func(msgs []model.Message) model.Reply {
+		for _, m := range msgs {
+			if m.Role == "tool" {
+				toolSeen = true
+				saw = stringOf(m)
+			}
+		}
+		if toolSeen {
+			return model.Reply{Content: "done."}
+		}
+		return model.Reply{
+			ToolCalls: []model.ToolCall{{ID: "c1", Type: "function", Function: model.FunctionCall{
+				Name: "run_command", Arguments: `{"command": "echo plan-ok"}`}}},
+		}
+	}
+	eng, ui, _ := mustBuild(t, brain, nil, "echo*")
+	eng.SetMode(ModePlan)
+	sum, err := eng.RunTurn(context.Background(), "run the allowed command")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.PlanBlocked != 0 || sum.CommandCalls != 1 {
+		t.Fatalf("allowlisted command must run in plan mode: %+v", sum)
+	}
+	if len(ui.approvals) != 0 {
+		t.Fatalf("allowlisted command must not prompt: %v", ui.approvals)
+	}
+	if !strings.Contains(saw, "exit code 0") {
+		t.Fatalf("command result missing: %q", saw)
+	}
+}
+
+func TestPlanModeDenylistStillWins(t *testing.T) {
+	// The denylist is checked before plan mode: a denied command reports the
+	// deny rule, not the plan policy.
+	var saw string
+	toolSeen := false
+	brain := func(msgs []model.Message) model.Reply {
+		for _, m := range msgs {
+			if m.Role == "tool" {
+				toolSeen = true
+				saw = stringOf(m)
+			}
+		}
+		if toolSeen {
+			return model.Reply{Content: "fine."}
+		}
+		return model.Reply{
+			ToolCalls: []model.ToolCall{{ID: "c1", Type: "function", Function: model.FunctionCall{
+				Name: "run_command", Arguments: `{"command": "echo denied"}`}}},
+		}
+	}
+	dir := t.TempDir()
+	root, _ := sandbox.NewRoot(dir)
+	srv := mock.New(brain)
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	cfg := config.Defaults()
+	cfg.Root = dir
+	cfg.Model.Model = "mock"
+	cfg.Model.BaseURL = "http://" + srv.Addr() + "/v1"
+	sbx := sandbox.NewSandbox(root, sandbox.FilesConfig{MaxReadBytes: 1 << 20, MaxWriteBytes: 1 << 20})
+	allow, _ := approvals.New("", false, nil, []string{"echo*"})
+	auditLog, _ := audit.New(filepath.Join(dir, "audit.jsonl"))
+	defer auditLog.Close()
+	ui := &fakeUI{}
+	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
+	eng := mustNew(t, cfg, client, sbx, allow, auditLog, ui, "s")
+	eng.SetMode(ModePlan)
+	sum, err := eng.RunTurn(context.Background(), "run denied")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.DeniedCommands != 1 || sum.PlanBlocked != 0 {
+		t.Fatalf("denylist must beat plan mode: %+v", sum)
+	}
+	if !strings.Contains(saw, "denylist") {
+		t.Fatalf("denied command must report the deny rule: %q", saw)
+	}
+}
+
+func TestPlanModeNoteInRequests(t *testing.T) {
+	// While plan mode is active each request carries an ephemeral system
+	// note, so the model learns the mode even with a long history.
+	sawNote := false
+	brain := func(msgs []model.Message) model.Reply {
+		for _, m := range msgs {
+			if m.Role == "system" && strings.Contains(stringOf(m), "CURRENT MODE: plan") {
+				sawNote = true
+			}
+		}
+		return model.Reply{Content: "plain answer."}
+	}
+	eng, _, _ := mustBuild(t, brain, nil)
+	eng.SetMode(ModePlan)
+	if _, err := eng.RunTurn(context.Background(), "plan something"); err != nil {
+		t.Fatal(err)
+	}
+	if !sawNote {
+		t.Fatal("plan-mode request must carry the ephemeral mode note")
+	}
+	if sys := stringOf(eng.History()[0]); strings.Contains(sys, "CURRENT MODE") {
+		t.Fatal("mode note must not be persisted into the history")
+	}
+}
+
+func TestToolsForMode(t *testing.T) {
+	all := AllTools()
+	if len(all) != 5 {
+		t.Fatalf("build advertises 5 tools, got %d", len(all))
+	}
+	plan := toolsForMode(true)
+	if len(plan) != 3 {
+		t.Fatalf("plan advertises 3 tools, got %d", len(plan))
+	}
+	names := map[string]bool{}
+	for _, tl := range plan {
+		names[tl.Function.Name] = true
+	}
+	if !names["list_files"] || !names["read_file"] || !names["search_files"] {
+		t.Fatalf("plan tool set wrong: %v", names)
+	}
+	if names["write_file"] || names["run_command"] {
+		t.Fatal("write_file and run_command must be hidden in plan mode")
+	}
+	if got := toolsForMode(false); len(got) != 5 {
+		t.Fatal("build mode must advertise everything")
+	}
+}
+
+// mustBuild builds an engine that must start successfully, failing the test
+// otherwise; see buildEngine for parameters.
+func mustBuild(t *testing.T, brain mock.Brain, cfgFn func(*config.Config), allowRules ...string) (*Engine, *fakeUI, error) {
+	t.Helper()
+	eng, ui, err := buildEngine(t, brain, cfgFn, allowRules...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return eng, ui, err
 }
 
 func readRootFile(t *testing.T, sbx *sandbox.Sandbox, path string) (string, error) {

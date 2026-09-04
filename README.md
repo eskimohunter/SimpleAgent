@@ -187,11 +187,32 @@ server etc.).
 |---|---|
 | plain text     | send a message to the agent (multiline: end a line with `\`) |
 | `y` / `a` / `n` | at an approval prompt: run once / always allow / deny |
+| `Tab`          | at the prompt: toggle plan/build mode (TTY only; discards the half-typed line) |
 | `/approvals`     | show the current allowlist and denylist rules |
+| `/mode`          | show the current mode; `/mode plan` / `/mode build` switch (needed for piped input) |
 | `/new`         | reset conversation (new session file) |
 | `/help`        | this list |
 | `/exit`        | quit |
 | `Ctrl+C`       | interrupt the running turn (again at idle: quit) |
+
+## Modes: plan and build
+
+Press **Tab** at the prompt (or use `/mode`) to switch between two working
+modes; the prompt shows which one is active (`user>` = build, `plan>` =
+plan). The mode is enforced in code, not just suggested, and survives `/new`
+for the rest of the session:
+
+| | build mode (default) | plan mode |
+|---|---|---|
+| `read_file` / `list_files` / `search_files` | yes | yes |
+| `write_file` | yes | **blocked** — the agent is told to plan, not edit |
+| `run_command` | approval-gated as usual | **only allowlisted commands run** (the same rules that auto-approve in build mode); everything else is refused **without a prompt** |
+
+In plan mode the harness hides `write_file` and `run_command` from the
+model's tool list and refuses them at dispatch anyway; a per-request note
+reminds the model of the mode. The denylist is checked before the mode in
+both modes. Use plan mode to let the agent investigate and propose a
+concrete plan, then Tab back to build mode to execute it.
 
 ## Agent capabilities
 
