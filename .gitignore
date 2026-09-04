@@ -1,0 +1,6 @@
+bin/
+dist/
+.agent/
+node_modules/
+package.json
+package-lock.json
