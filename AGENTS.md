@@ -59,7 +59,10 @@ Linux; CI (`.github/workflows/ci.yml`) runs Linux and Windows jobs.
   (next to the binary, same filesystem, chmod'd to the original's mode so
   the rename cannot strip the execute bit) → swap (`swap_unix.go` atomic
   rename / `swap_windows.go` `exe → exe.old` dance with rollback) →
-  restart via inherited-stdio exec. Verified in
+  restart: Unix re-execs in place (`syscall.Exec`, `repl/restart_unix.go`
+  — same PID/terminal, or the shell's job control would stop the child
+  with SIGTTIN); Windows spawns with inherited stdio
+  (`repl/restart_windows.go`). Verified in
   `internal/update/update_test.go` against an httptest fake GitHub.
   An offline or no-release run reports and continues; the success path
   (swap + restart) is covered by unit tests, not by real GitHub.

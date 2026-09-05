@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -320,7 +319,9 @@ func (r *REPL) handleMode(parts []string) {
 // latest released version against the running one, and when a newer release
 // exists asks the user, downloads the platform's binary, verifies its
 // SHA-256 against the release's SHA256SUMS, swaps it in for the running
-// executable and spawns a restart before returning quit=true.
+// executable and restarts into the new version (see restartExecutable).
+// A successful Unix run does not return; the Windows path returns
+// quit=true so the REPL ends.
 //
 // Every failure is reported to the user and the session continues: only a
 // confirmed, verified, successfully installed update ends the REPL. In mock
@@ -378,14 +379,14 @@ func (r *REPL) handleUpdate() (bool, error) {
 		"sha256": hexSum,
 	})
 
-	if err := r.restart(exe); err != nil {
-		// The swap already happened and the binary is executable; keep the
-		// REPL running (a manual /exit relaunches the new version) instead
-		// of silently ending the session.
-		return false, fmt.Errorf("update installed, but restarting failed: %w", err)
-	}
+	// Restart with the new version: on Unix the running process image is
+	// replaced in place (syscall.Exec, restart_unix.go) and this call never
+	// returns, so the notice above is the last thing printed by this
+	// process. On Windows the new binary is spawned (restart_windows.go)
+	// and this function returns true so the REPL ends and the old process
+	// exits.
 	r.ui.Info("restarting with the new version...")
-	return true, nil
+	return true, restartExecutable(exe)
 }
 
 // confirm asks a yes/no question through the shared input reader, so it
@@ -401,21 +402,4 @@ func (r *REPL) confirm(question string) (bool, error) {
 	}
 	a := strings.ToLower(strings.TrimSpace(line))
 	return a == "y" || a == "yes", nil
-}
-
-// restart spawns a fresh copy of the (newly replaced) binary with the same
-// arguments and stdio, then returns so the caller can end the REPL and let
-// the old process exit. The child inherits the console, so the session
-// appears to continue seamlessly. On Windows the swapped-away .old image is
-// cleaned up best-effort once the child is running.
-func (r *REPL) restart(exe string) error {
-	child := exec.Command(exe, os.Args[1:]...)
-	child.Stdin = os.Stdin
-	child.Stdout = os.Stdout
-	child.Stderr = os.Stderr
-	if err := child.Start(); err != nil {
-		return err
-	}
-	update.RemoveOldBinary(exe)
-	return nil
 }

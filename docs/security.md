@@ -117,7 +117,11 @@ GitHub. The upgrade path is deliberately narrow and verifiable:
   SHA-256 entry *before* it is staged or swapped in;
 - the swap replaces the running executable in place (atomic rename on Unix;
   the rename-dance through `exe.old` on Windows, with rollback on failure)
-  and the newly installed version shows its real release version at startup;
+  and the newly installed version shows its real release version at startup.
+  The restarted harness keeps the same terminal: Unix re-execs in place
+  (`syscall.Exec`, same PID), Windows spawns a child with inherited stdio —
+  a spawn-then-exit on Unix would let the parent shell reclaim the tty and
+  SIGTTIN-stop the new process;
 - the whole flow is user-confirmed interactively (`y/N`, no = no change) and
   audited: a successful upgrade writes an `update_applied` event with the
   from/to versions and the verified SHA-256.

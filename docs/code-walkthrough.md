@@ -166,6 +166,12 @@ user-confirmed newer release proceeds. The mechanics live in this package:
   overwriting a running binary, and the `exe → exe.old → new exe` dance with
   rollback on Windows, whose `RemoveOldBinary` cleanup makes the surface
   symmetrical.
+- `repl/restart_unix.go` / `restart_windows.go` — the restart after the
+  swap. Unix re-execs in place (`syscall.Exec`: same PID, session and
+  foreground process group, so the terminal keeps working — a spawned
+  child would be SIGTTIN-stopped when the shell's job control reclaims
+  the tty); Windows spawns a child with inherited stdio and the caller
+  returns so the old process exits.
 
 ### Step 7 — `internal/sandbox` — read this twice
 This is the security core; `docs/security.md` explains the threat model.
