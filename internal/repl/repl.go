@@ -389,14 +389,13 @@ func (r *REPL) handleUpdate() (bool, error) {
 	return true, restartExecutable(exe)
 }
 
-// confirm asks a yes/no question through the shared input reader, so it
-// works identically on a TTY and on piped input. Bare Enter or any non-"y"
-// answer means no. The prompt is drawn even when stdin is not a terminal so
-// CI and scripting see a matching transcript.
+// confirm asks a yes/no question, works identically on a TTY and on piped
+// input. Bare Enter or any non-"y" answer means no. The prompt is drawn
+// even when stdin is not a terminal so CI and scripting see a matching
+// transcript.
 func (r *REPL) confirm(question string) (bool, error) {
 	r.ui.Info(question + " [y/N]")
-	r.ui.write(r.ui.paint("33", "y/n> "))
-	line, err := r.ui.readSingleLine()
+	line, err := r.ui.readPrompt(r.ui.paint("33", "y/n> "))
 	if err != nil {
 		return false, err
 	}

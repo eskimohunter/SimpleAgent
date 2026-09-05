@@ -45,6 +45,89 @@ func stagedUI(stages ...string) *TextUI {
 	return &TextUI{in: bufio.NewReader(&stagedReader{stages: stages}), out: io.Discard}
 }
 
+func TestReadSingleLineEndings(t *testing.T) {
+	cases := []struct {
+		name, input, want string
+	}{
+		{"lf", "y\n", "y"},
+		{"cr", "y\r", "y"},
+		{"crlf", "n\r\n", "n"},
+		{"empty_cr", "\r", ""},
+		{"empty_lf", "\n", ""},
+		{"two_lines", "a\rb\n", "a"}, // first line terminates at CR
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ui := rawTestUI(c.input)
+			line, err := ui.readSingleLine()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if line != c.want {
+				t.Fatalf("readSingleLine(%q) = %q; want %q", c.input, line, c.want)
+			}
+		})
+	}
+}
+
+func TestReadSingleLineEOF(t *testing.T) {
+	// A partial line at EOF is returned as-is (piped scripts without a
+	// trailing newline); an empty stream reports EOF so the caller can
+	// treat it as "no input".
+	ui := rawTestUI("data")
+	line, err := ui.readSingleLine()
+	if err != nil {
+		t.Fatalf("partial line: err = %v", err)
+	}
+	if line != "data" {
+		t.Fatalf("partial line = %q; want data", line)
+	}
+
+	ui = rawTestUI("")
+	if _, err := ui.readSingleLine(); err != io.EOF {
+		t.Fatalf("empty stream: err = %v; want EOF", err)
+	}
+}
+
+// TestReadPromptNonTTY exercises the piped/CI path of readPrompt
+// (tty=false): the prompt is printed and the answer is read with the
+// same line-ending freedom as readSingleLine.
+func TestReadPromptNonTTY(t *testing.T) {
+	cases := []struct {
+		name, input, want string
+	}{
+		{"lf", "y\n", "y"},
+		{"cr", "n\r", "n"},
+		{"crlf", "yes\r\n", "yes"},
+		{"empty", "\r\n", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out bytes.Buffer
+			ui := &TextUI{in: bufio.NewReader(strings.NewReader(c.input)), out: &out}
+			got, err := ui.readPrompt("y/n> ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != c.want {
+				t.Fatalf("readPrompt(%q) = %q; want %q", c.input, got, c.want)
+			}
+			if !strings.Contains(out.String(), "y/n> ") {
+				t.Errorf("prompt was not printed: %q", out.String())
+			}
+		})
+	}
+}
+
+// TestReadPromptNonTTYEOF ensures an empty piped stream surfaces EOF so
+// the caller can decide (confirm treats it as "no").
+func TestReadPromptNonTTYEOF(t *testing.T) {
+	ui := &TextUI{in: bufio.NewReader(strings.NewReader("")), out: io.Discard}
+	if _, err := ui.readPrompt("y/n> "); err != io.EOF {
+		t.Fatalf("err = %v; want EOF", err)
+	}
+}
+
 func TestRawReaderTabTogglesMode(t *testing.T) {
 	// A lone Tab keystroke at the empty prompt toggles; text typed after it
 	// is read normally.

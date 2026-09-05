@@ -49,7 +49,12 @@ Linux; CI (`.github/workflows/ci.yml`) runs Linux and Windows jobs.
   `slashCommands` in `repl.go`: it feeds both `/help` and the menu, and
   `/exit` + `/new` + `/update` are confirm-guarded there. Raw-mode behavior
   is never exercised by piped CI — it needs the staged-input unit tests
-  (`internal/repl/ui_test.go`) and a manual terminal check.
+  (`internal/repl/ui_test.go`) and a manual terminal check. Prompt reads
+  (`readSingleLine` for pipes, `readPrompt` for TTYs) accept bare `\r`,
+  bare `\n`, or CRLF as the line end and never depend on the tty's ICRNL
+  (CR→LF translation) setting: cooked reads hang forever when ICRNL is
+  off, so interactive approval/confirm prompts (`readPrompt`) read in raw
+  mode where every key, including Enter, arrives as a plain byte.
 - `/update` (`internal/update`): the second network code path (after the
   model client), user-triggered only. Hardcoded repo
   `eskimohunter/SimpleAgent`. The newest release is compared against the

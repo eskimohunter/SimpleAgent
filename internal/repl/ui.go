@@ -184,8 +184,7 @@ func (u *TextUI) ApproveCommand(ctx context.Context, cmd string) (approvals.Deci
 			return approvals.Deny, ctx.Err()
 		default:
 		}
-		u.write(u.paint("33", "y/a/n> "))
-		line, err := u.readSingleLine()
+		line, err := u.readPrompt(u.paint("33", "y/a/n> "))
 		if err != nil {
 			return approvals.Deny, err
 		}
@@ -202,15 +201,98 @@ func (u *TextUI) ApproveCommand(ctx context.Context, cmd string) (approvals.Deci
 	}
 }
 
-// readSingleLine reads one physical line from the input, stripping the
-// trailing newline (and optional CR, for Windows-style line endings).
-func (u *TextUI) readSingleLine() (string, error) {
-	line, err := u.in.ReadString('\n')
-	line = strings.TrimRight(line, "\r\n")
-	if err != nil && line == "" {
-		return "", err
+// readPrompt reads one short answer from the user (approval and confirm
+// prompts). On a real terminal it switches to raw mode and echoes keys
+// itself, so the read works regardless of the terminal's line discipline:
+// a cooked read depends on CR->LF input translation (termios ICRNL) to
+// even receive the Enter key - with ICRNL off, canonical mode treats CR
+// as plain data, never as a line terminator, and the read hangs forever
+// while the ECHOCTL'd "^M" is what the user sees. Raw mode delivers every
+// key as it is pressed and the CR becomes a plain byte we can match.
+//
+// Handled keys: Enter (CR or LF) submits, Backspace erases, Ctrl+C
+// returns errUserQuit. Only printable characters echo, so no control
+// sequences can leak into the transcript. The terminal is restored before
+// returning, exactly like ReadUserInteractive does. On non-TTY input
+// (pipes, CI) the prompt is printed and the rune-based readSingleLine is
+// used, preserving the cooked behavior.
+func (u *TextUI) readPrompt(prompt string) (string, error) {
+	if !u.tty {
+		u.write(prompt)
+		return u.readSingleLine()
 	}
-	return line, nil
+	restore, err := enterRawMode()
+	if err != nil {
+		// Raw input unavailable (unsupported platform, not a console):
+		// degrade to the cooked reader on a fresh line.
+		fmt.Fprintln(u.out)
+		u.write(prompt)
+		return u.readSingleLine()
+	}
+	defer restore()
+	u.write(prompt)
+	var sb strings.Builder
+	for {
+		r, _, err := u.in.ReadRune()
+		if err != nil {
+			return sb.String(), err
+		}
+		switch r {
+		case '\r', '\n':
+			// Enter submits the answer.
+			fmt.Fprintln(u.out)
+			return sb.String(), nil
+		case 0x7f, '\b':
+			// Backspace erases one rune (echoing the erase sequence).
+			rr := []rune(sb.String())
+			if len(rr) > 0 {
+				rr = rr[:len(rr)-1]
+				sb.Reset()
+				sb.WriteString(string(rr))
+				u.write("\b \b")
+			}
+		case 0x03:
+			// Ctrl+C: same meaning as at the idle raw prompt - quit-ish.
+			fmt.Fprintln(u.out)
+			return "", errUserQuit
+		default:
+			if r >= ' ' {
+				sb.WriteRune(r)
+				u.write(string(r))
+			}
+		}
+	}
+}
+
+// readSingleLine reads one physical line from the input, terminating on a
+// bare CR, a bare LF, or a CRLF pair. Both line endings are accepted because
+// the caller's CR->LF input translation (termios ICRNL) is not guaranteed:
+// a raw-mode toggle, a terminal started with "stty -icrnl", or a CRLF
+// console would otherwise leave the "\n" read hanging forever (the CR never
+// becomes a newline). The line ending is stripped from the result.
+func (u *TextUI) readSingleLine() (string, error) {
+	var sb strings.Builder
+	for {
+		r, _, err := u.in.ReadRune()
+		if err != nil {
+			if err == io.EOF && sb.Len() > 0 {
+				return sb.String(), nil
+			}
+			return sb.String(), err
+		}
+		if r == '\n' {
+			return sb.String(), nil
+		}
+		if r == '\r' {
+			// CRLF: consume the LF that follows (if any) so it cannot be
+			// misread as an empty next line.
+			if next, _, err := u.in.ReadRune(); err == nil && next != '\n' {
+				_ = u.in.UnreadRune()
+			}
+			return sb.String(), nil
+		}
+		sb.WriteRune(r)
+	}
 }
 
 // ReadUserLine reads one logical user message. A line ending in "\" is a
