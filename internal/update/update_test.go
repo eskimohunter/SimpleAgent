@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -211,12 +212,16 @@ func TestInstall(t *testing.T) {
 	}
 	// The staged file's mode survives the rename, so the executable bit
 	// must be restored from the original binary - otherwise the restart
-	// and any later manual launch fail with EACCES.
-	if fi.Mode().Perm()&0o111 == 0 {
-		t.Errorf("installed binary lost its execute bit: mode %o", fi.Mode().Perm())
-	}
-	if fi.Mode().Perm() != 0o755 {
-		t.Errorf("installed binary mode = %o; want 755 (preserved from the original)", fi.Mode().Perm())
+	// and any later manual launch fail with EACCES. Windows has no Unix
+	// mode bits (Perm() is 0666 for any writable file), so the exec-bit
+	// check only applies where the bit means something.
+	if runtime.GOOS != "windows" {
+		if fi.Mode().Perm()&0o111 == 0 {
+			t.Errorf("installed binary lost its execute bit: mode %o", fi.Mode().Perm())
+		}
+		if fi.Mode().Perm() != 0o755 {
+			t.Errorf("installed binary mode = %o; want 755 (preserved from the original)", fi.Mode().Perm())
+		}
 	}
 	sum := sha256.Sum256(rs.bin)
 	if hexSum != hex.EncodeToString(sum[:]) {
@@ -232,15 +237,23 @@ func TestInstallPreservesMode(t *testing.T) {
 	if err := os.Chmod(exe, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := up.Install(context.Background(), rel, "linux", exe); err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Stat(exe)
+	// Snapshot the mode BEFORE install (after the chmod); on Windows this
+	// is 0666 for every writable file, on Unix 0750. The assertion below is
+	// simply "the mode you had is the mode you keep", which is the
+	// property the install flow must guarantee on every platform.
+	want, err := os.Stat(exe)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o750 {
-		t.Errorf("installed binary mode = %o; want 750 (preserved)", fi.Mode().Perm())
+	if _, err := up.Install(context.Background(), rel, "linux", exe); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Stat(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode().Perm() != want.Mode().Perm() {
+		t.Errorf("installed binary mode = %o; want %o (preserved)", got.Mode().Perm(), want.Mode().Perm())
 	}
 }
 
