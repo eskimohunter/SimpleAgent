@@ -61,22 +61,25 @@ type Asset struct {
 	URL  string `json:"browser_download_url"`
 }
 
-// LatestRelease returns the newest release we can offer: the latest
-// non-prerelease release (releases/latest) when the repo has one, otherwise
-// the highest-versioned release from the full list. The fallback matters
-// because a repo that only publishes prereleases - as SimpleAgent does while
-// it is still early - otherwise gives /update nothing to find, even though
-// newer builds exist. The error is ErrNoRelease when the repo has no
-// releases at all.
-func (u *Updater) LatestRelease(ctx context.Context) (*Release, error) {
+// LatestRelease returns the newest release that can actually be installed
+// for the given GOOS: the latest non-prerelease release (releases/latest)
+// when it carries the platform binary and SHA256SUMS, otherwise the
+// highest-versioned complete release from the full list (prereleases
+// included). The two fallbacks exist because a repo that only publishes
+// prereleases - as SimpleAgent does while it is still early - otherwise
+// gives /update nothing to find, and a broken top release (partial asset
+// upload) otherwise hard-fails the update even though an older complete
+// release exists. The error is ErrNoRelease when the repo has no releases
+// at all.
+func (u *Updater) LatestRelease(ctx context.Context, goos string) (*Release, error) {
 	rel, err := u.latestStable(ctx)
-	if err == nil {
+	if err == nil && rel.complete(goos) {
 		return rel, nil
 	}
-	if !errors.Is(err, ErrNoRelease) {
+	if err != nil && !errors.Is(err, ErrNoRelease) {
 		return nil, err
 	}
-	return u.highestRelease(ctx)
+	return u.highestRelease(ctx, goos)
 }
 
 // latestStable queries the releases/latest endpoint, which never returns
@@ -109,9 +112,11 @@ func (u *Updater) latestStable(ctx context.Context) (*Release, error) {
 	return &rel, nil
 }
 
-// listReleases fetches the full release list, drafts and prereleases
-// included. GitHub orders it newest first, but the caller should not rely
-// on that alone.
+// listReleases fetches the release list, drafts and prereleases included.
+// GitHub orders it newest first, but the caller deliberately ranks by
+// version instead, so partial ordering is fine. Note the list is paginated
+// (30 per page, first page only): a repo with more than 30 releases must
+// keep its tags version-monotonic for the oldest entries to be visible.
 func (u *Updater) listReleases(ctx context.Context) ([]Release, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.repo+"/releases", nil)
 	if err != nil {
@@ -138,44 +143,73 @@ func (u *Updater) listReleases(ctx context.Context) ([]Release, error) {
 }
 
 // highestRelease picks the highest-versioned non-draft release from the
-// full list; drafts are skipped (they are not user-facing), prereleases are
-// kept. Versions are compared numerically, so the list order does not
-// matter; ties keep the earlier entry.
-func (u *Updater) highestRelease(ctx context.Context) (*Release, error) {
+// full list that carries a complete asset set for goos (platform binary +
+// SHA256SUMS), so a partially-uploaded release cannot block updates. If no
+// release is complete, the highest-versioned one is returned anyway and
+// FindAsset reports which asset is missing. Drafts are skipped; GitHub does
+// not list drafts to unauthenticated callers, but the check keeps the
+// behavior correct if the updater ever gets authenticated.
+func (u *Updater) highestRelease(ctx context.Context, goos string) (*Release, error) {
 	rels, err := u.listReleases(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var best *Release
-	var bestV version
+	var best, bestComplete *Release
+	var bestV, bestCompleteV version
 	for i := range rels {
 		rel := &rels[i]
 		if rel.Draft {
 			continue
 		}
 		v := parseVersion(rel.TagName)
-		if best == nil {
-			best = rel
-			bestV = v
-			continue
-		}
-		// A parseable version always outranks an unparseable tag (compare
-		// treats invalid inputs as equal, so that case must be decided
-		// here); between two unparseable tags the earlier entry wins.
-		switch {
-		case !bestV.valid && v.valid:
-			best = rel
-			bestV = v
-		case bestV.valid && !v.valid:
-		case compare(v, bestV) > 0:
+		if better(rel, v, best, bestV) {
 			best = rel
 			bestV = v
 		}
+		if rel.complete(goos) && better(rel, v, bestComplete, bestCompleteV) {
+			bestComplete = rel
+			bestCompleteV = v
+		}
+	}
+	if bestComplete != nil {
+		return bestComplete, nil
 	}
 	if best == nil {
 		return nil, ErrNoRelease
 	}
 	return best, nil
+}
+
+// better ranks a candidate release against the current best: a parseable
+// version always outranks an unparseable tag (compare treats invalid
+// inputs as equal, so that case must be decided here); otherwise the
+// higher numeric version wins; ties keep the earlier entry.
+func better(cand *Release, candV version, best *Release, bestV version) bool {
+	if best == nil {
+		return true
+	}
+	if bestV.valid != candV.valid {
+		return candV.valid
+	}
+	return compare(candV, bestV) > 0
+}
+
+// complete reports whether the release carries the platform binary asset
+// and SHA256SUMS - everything Install needs. Name presence is enough here;
+// FindAsset produces the detailed refusal when only an incomplete release
+// is available.
+func (rel *Release) complete(goos string) bool {
+	want := binaryName(goos)
+	hasBin, hasSums := false, false
+	for _, a := range rel.Assets {
+		switch a.Name {
+		case want:
+			hasBin = true
+		case "SHA256SUMS":
+			hasSums = true
+		}
+	}
+	return hasBin && hasSums
 }
 
 // binaryName is the release asset name for the platform we are running on.

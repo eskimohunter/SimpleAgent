@@ -331,7 +331,7 @@ func (r *REPL) handleUpdate() (bool, error) {
 	defer cancel()
 	up := update.NewUpdater()
 
-	rel, err := up.LatestRelease(ctx)
+	rel, err := up.LatestRelease(ctx, runtime.GOOS)
 	if err != nil {
 		if errors.Is(err, update.ErrNoRelease) {
 			r.ui.Info("no released versions found to update to.")

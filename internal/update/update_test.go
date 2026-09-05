@@ -33,7 +33,11 @@ func newReleaseServer(t *testing.T, tag string) *releaseServer {
 	sumsText := fmt.Sprintf("%s  simpleagent-linux-amd64\n", hex.EncodeToString(sums[:]))
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+	// releaseJSON builds the single-release payload honoring rs.noBin /
+	// rs.noSums; it is served from both /releases/latest and /releases (the
+	// latter as a one-element list) so the prerelease fallback path can be
+	// exercised with the same fixture.
+	releaseJSON := func() string {
 		sumsAsset := fmt.Sprintf(`{"name":"SHA256SUMS","browser_download_url":%q}`, rs.srv.URL+"/SHA256SUMS")
 		binAsset := fmt.Sprintf(`{"name":"simpleagent-linux-amd64","browser_download_url":%q}`, rs.srv.URL+"/binary")
 		if rs.noBin {
@@ -46,7 +50,13 @@ func newReleaseServer(t *testing.T, tag string) *releaseServer {
 		if sumsAsset != "" {
 			assets += "," + sumsAsset
 		}
-		fmt.Fprintf(w, `{"tag_name":%q,"assets":[%s]}`, tag, assets)
+		return fmt.Sprintf(`{"tag_name":%q,"assets":[%s]}`, tag, assets)
+	}
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, releaseJSON())
+	})
+	mux.HandleFunc("/releases", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, "[%s]", releaseJSON())
 	})
 	mux.HandleFunc("/binary", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write(rs.bin)
@@ -76,7 +86,7 @@ func testUpdater(rs *releaseServer) *Updater {
 func TestLatestRelease(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
 	up := testUpdater(rs)
-	rel, err := up.LatestRelease(context.Background())
+	rel, err := up.LatestRelease(context.Background(), "linux")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +105,7 @@ func TestLatestReleaseNotFound(t *testing.T) {
 	defer srv.Close()
 	up := NewUpdater()
 	up.repo = srv.URL
-	if _, err := up.LatestRelease(context.Background()); err != ErrNoRelease {
+	if _, err := up.LatestRelease(context.Background(), "linux"); err != ErrNoRelease {
 		t.Errorf("err = %v; want ErrNoRelease", err)
 	}
 }
@@ -125,7 +135,7 @@ func TestLatestReleaseFallsBackToPrerelease(t *testing.T) {
 			{"name":"SHA256SUMS","browser_download_url":"https://example.invalid/s"}
 		]}
 	]`)
-	rel, err := up.LatestRelease(context.Background())
+	rel, err := up.LatestRelease(context.Background(), "linux")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +151,7 @@ func TestLatestReleasePicksHighest(t *testing.T) {
 		{"tag_name":"v9.9.9","draft":true},
 		{"tag_name":"v0.0.3","draft":false}
 	]`)
-	rel, err := up.LatestRelease(context.Background())
+	rel, err := up.LatestRelease(context.Background(), "linux")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +165,7 @@ func TestLatestReleasePicksHighestUnparseableTags(t *testing.T) {
 		{"tag_name":"latest-stuff","draft":false},
 		{"tag_name":"v0.0.3","draft":false}
 	]`)
-	rel, err := up.LatestRelease(context.Background())
+	rel, err := up.LatestRelease(context.Background(), "linux")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,9 +176,82 @@ func TestLatestReleasePicksHighestUnparseableTags(t *testing.T) {
 	}
 }
 
+// assetJSON renders the two-asset payload the completeness check needs.
+func TestLatestReleasePrefersCompleteOverHigherIncomplete(t *testing.T) {
+	up := releaseListServer(t, `[
+		{"tag_name":"v0.1.0","draft":false,"assets":[]},
+		{"tag_name":"v0.0.3","draft":false,"assets":[
+			{"name":"simpleagent-linux-amd64","browser_download_url":"https://example.invalid/b"},
+			{"name":"SHA256SUMS","browser_download_url":"https://example.invalid/s"}
+		]}
+	]`)
+	rel, err := up.LatestRelease(context.Background(), "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// v0.1.0 has no assets (a partial upload); the update must not hard-fail
+	// on it when v0.0.3 is complete.
+	if rel.TagName != "v0.0.3" {
+		t.Errorf("tag = %q; want v0.0.3 (complete, over incomplete v0.1.0)", rel.TagName)
+	}
+}
+
+func TestLatestReleaseReturnsIncompleteWhenNothingElse(t *testing.T) {
+	up := releaseListServer(t, `[
+		{"tag_name":"v0.1.0","draft":false,"assets":[
+			{"name":"simpleagent-linux-amd64","browser_download_url":"https://example.invalid/b"}
+		]}
+	]`)
+	rel, err := up.LatestRelease(context.Background(), "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel.TagName != "v0.1.0" {
+		t.Errorf("tag = %q; want v0.1.0", rel.TagName)
+	}
+	// The detailed refusal comes from FindAsset, so the user learns what
+	// is missing instead of getting a bare "nothing to update".
+	if _, _, err := rel.FindAsset("linux"); err == nil ||
+		!strings.Contains(err.Error(), "no SHA256SUMS asset") {
+		t.Errorf("FindAsset on incomplete release: err = %v", err)
+	}
+}
+
+func TestLatestReleaseSkipsIncompleteStable(t *testing.T) {
+	// One server for both endpoints: releases/latest returns a stable
+	// release WITHOUT SHA256SUMS, the full list has a complete v0.0.3.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/releases/latest":
+			fmt.Fprint(w, `{"tag_name":"v0.0.2","draft":false,"assets":[
+				{"name":"simpleagent-linux-amd64","browser_download_url":"https://example.invalid/b"}
+			]}`)
+		case "/releases":
+			fmt.Fprint(w, `[
+				{"tag_name":"v0.0.3","draft":false,"assets":[
+					{"name":"simpleagent-linux-amd64","browser_download_url":"https://example.invalid/b"},
+					{"name":"SHA256SUMS","browser_download_url":"https://example.invalid/s"}
+				]}
+			]`)
+		default:
+			http.NotFound(w, nil)
+		}
+	}))
+	defer srv.Close()
+	u := NewUpdater()
+	u.repo = srv.URL
+	rel, err := u.LatestRelease(context.Background(), "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel.TagName != "v0.0.3" {
+		t.Errorf("tag = %q; want v0.0.3 (complete, stable v0.0.2 skipped as incomplete)", rel.TagName)
+	}
+}
+
 func TestFindAsset(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
-	rel, err := testUpdater(rs).LatestRelease(context.Background())
+	rel, err := testUpdater(rs).LatestRelease(context.Background(), "linux")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +267,7 @@ func TestFindAsset(t *testing.T) {
 	})
 
 	rs.noBin = true
-	rel2, _ := testUpdater(rs).LatestRelease(context.Background())
+	rel2, _ := testUpdater(rs).LatestRelease(context.Background(), "linux")
 	if _, _, err := rel2.FindAsset("linux"); err == nil ||
 		!strings.Contains(err.Error(), "no binary for linux") {
 		t.Errorf("missing binary: err = %v", err)
@@ -192,7 +275,7 @@ func TestFindAsset(t *testing.T) {
 
 	rs.noBin = false
 	rs.noSums = true
-	rel3, _ := testUpdater(rs).LatestRelease(context.Background())
+	rel3, _ := testUpdater(rs).LatestRelease(context.Background(), "linux")
 	if _, _, err := rel3.FindAsset("linux"); err == nil ||
 		!strings.Contains(err.Error(), "no SHA256SUMS asset") {
 		t.Errorf("missing checksums: err = %v", err)
@@ -211,7 +294,7 @@ func TestBinaryName(t *testing.T) {
 func TestDownload(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
 	up := testUpdater(rs)
-	rel, _ := up.LatestRelease(context.Background())
+	rel, _ := up.LatestRelease(context.Background(), "linux")
 	bin, _, _ := rel.FindAsset("linux")
 
 	got, err := up.Download(context.Background(), bin.URL)
@@ -230,7 +313,7 @@ func TestDownload(t *testing.T) {
 func TestVerify(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
 	up := testUpdater(rs)
-	rel, _ := up.LatestRelease(context.Background())
+	rel, _ := up.LatestRelease(context.Background(), "linux")
 	bin, sums, _ := rel.FindAsset("linux")
 	data, _ := up.Download(context.Background(), bin.URL)
 
@@ -261,7 +344,7 @@ func fakeExe(t *testing.T) string {
 func TestInstall(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
 	up := testUpdater(rs)
-	rel, _ := up.LatestRelease(context.Background())
+	rel, _ := up.LatestRelease(context.Background(), "linux")
 	exe := fakeExe(t)
 
 	hexSum, err := up.Install(context.Background(), rel, "linux", exe)
@@ -298,7 +381,7 @@ func TestInstall(t *testing.T) {
 func TestInstallPreservesMode(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
 	up := testUpdater(rs)
-	rel, _ := up.LatestRelease(context.Background())
+	rel, _ := up.LatestRelease(context.Background(), "linux")
 	exe := fakeExe(t)
 	if err := os.Chmod(exe, 0o750); err != nil {
 		t.Fatal(err)
@@ -327,7 +410,7 @@ func TestInstallRefusesBadChecksum(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
 	rs.badSum = true
 	up := testUpdater(rs)
-	rel, _ := up.LatestRelease(context.Background())
+	rel, _ := up.LatestRelease(context.Background(), "linux")
 	exe := fakeExe(t)
 
 	if _, err := up.Install(context.Background(), rel, "linux", exe); err == nil {
@@ -342,7 +425,7 @@ func TestInstallRefusesWithoutChecksums(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
 	rs.noSums = true
 	up := testUpdater(rs)
-	rel, _ := up.LatestRelease(context.Background())
+	rel, _ := up.LatestRelease(context.Background(), "linux")
 	exe := fakeExe(t)
 
 	if _, err := up.Install(context.Background(), rel, "linux", exe); err == nil {

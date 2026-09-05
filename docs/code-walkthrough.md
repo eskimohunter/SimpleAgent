@@ -148,10 +148,11 @@ the latest GitHub release (`NewerAvailable`, `version.go:74` — numeric
 `vX.Y.Z` compare, suffixes/dev builds never outrank a release), and only a
 user-confirmed newer release proceeds. The mechanics live in this package:
 
-- `github.go` — the hardcoded repo, `LatestRelease` (`github.go:71`):
-  `releases/latest` first, and when it 404s (repo has no stable release)
-  the highest-versioned release from the full `/releases` list
-  (prereleases included, drafts skipped). Plus the size-capped
+- `github.go` — the hardcoded repo, `LatestRelease` (`github.go:76`):
+  `releases/latest` first, and when it is absent or lacks the platform
+  binary + `SHA256SUMS`, the highest-versioned *complete* non-draft
+  release from the full `/releases` list (prereleases included, so a
+  partial-upload release cannot block updates). Plus the size-capped
   `Download`. `FindAsset` accepts exactly the two known asset names plus
   `SHA256SUMS`; anything else is refused.
 - `checksum.go` — parses the release's `SHA256SUMS` and compares the
