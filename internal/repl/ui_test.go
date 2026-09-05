@@ -406,8 +406,10 @@ func TestSlashMenuFilter(t *testing.T) {
 		typed string
 		want  []string
 	}{
-		{"/", []string{"/help", "/new", "/approvals", "/mode", "/exit"}},
+		{"/", []string{"/help", "/new", "/approvals", "/mode", "/update", "/exit"}},
 		{"/m", []string{"/mode"}},
+		{"/u", []string{"/update"}},
+		{"/up", []string{"/update"}},
 		{"/ex", []string{"/exit"}},
 		{"/EX", []string{"/exit"}},
 		{"/zzz", nil},
@@ -434,6 +436,11 @@ func TestSlashMenuFilter(t *testing.T) {
 	for _, c := range slashMenu("/n") {
 		if c.line == "/new" && !c.confirm {
 			t.Fatal("/new must be confirm-guarded")
+		}
+	}
+	for _, c := range slashMenu("/u") {
+		if c.line == "/update" && !c.confirm {
+			t.Fatal("/update must be confirm-guarded (it restarts the session)")
 		}
 	}
 }

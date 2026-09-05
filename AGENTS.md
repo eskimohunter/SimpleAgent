@@ -14,6 +14,9 @@ Linux; CI (`.github/workflows/ci.yml`) runs Linux and Windows jobs.
 - Guided learning guide with file:line anchors: `docs/code-walkthrough.md`.
   **Anchors go stale when code moves — update them when you edit the files
   they cite.**
+- One-page architecture map: `docs/architecture.png`, hand-authored in
+  `docs/architecture.svg` — edit the SVG and re-render (rsvg-convert at 2x)
+  when the wiring changes, then update the walkthrough's anchor for it.
 - Threat model / enforcement layers: `docs/security.md`.
 - Trust model: LLM output is untrusted; boundaries are enforced in code.
   The security-critical gate is `Root.Resolve` (`internal/sandbox/paths.go`):
@@ -32,10 +35,34 @@ Linux; CI (`.github/workflows/ci.yml`) runs Linux and Windows jobs.
     when allowlisted (no prompt); the engine advertises a reduced tool list
     and an ephemeral mode note per request. Enforcement order in
     `runCommandTool`: denylist -> mode policy -> prompt.
-- Platform-paired files via build tags (`proc_unix.go`/`proc_windows.go`,
-  `console_other.go`/`console_windows.go`), plus `runtime.GOOS == "windows"`
-  branches in `paths.go`. Edits there must be verified with a Windows
-  cross-build; Windows-only paths only get exercised by the Windows CI job.
+- Platform-paired files via build tags: `internal/sandbox/proc_unix.go` /
+  `proc_windows.go` and, for console input, THREE repl files —
+  `console_unix.go` (linux termios raw mode), `console_windows.go`
+  (`SetConsoleMode`), `console_other.go` (`!windows && !linux` cooked
+  fallback, darwin included). Plus `runtime.GOOS == "windows"` branches in
+  `paths.go`. Edits there must be verified with Windows (and darwin) cross
+  builds; Windows-only paths only get exercised by the Windows CI job.
+- REPL input is line-based when piped; on a real TTY the raw-mode reader in
+  `internal/repl/ui.go` (readRawLine) drives echo/Backspace, the Tab
+  plan/build toggle, and the `/`-command menu (arrows select, Enter runs,
+  Tab accepts, Esc dismisses for the line). Commands live in one table,
+  `slashCommands` in `repl.go`: it feeds both `/help` and the menu, and
+  `/exit` + `/new` + `/update` are confirm-guarded there. Raw-mode behavior
+  is never exercised by piped CI — it needs the staged-input unit tests
+  (`internal/repl/ui_test.go`) and a manual terminal check.
+- `/update` (`internal/update`): the second network code path (after the
+  model client), user-triggered only. Hardcoded repo
+  `eskimohunter/SimpleAgent`; `releases/latest` is compared against the
+  Makefile-stamped version (`internal/update/version.go`, numeric
+  `vX.Y.Z`); only the platform binary asset is accepted and only with the
+  release's `SHA256SUMS`; install is download → verify SHA-256 → stage
+  (next to the binary, same filesystem, chmod'd to the original's mode so
+  the rename cannot strip the execute bit) → swap (`swap_unix.go` atomic
+  rename / `swap_windows.go` `exe → exe.old` dance with rollback) →
+  restart via inherited-stdio exec. Verified in
+  `internal/update/update_test.go` against an httptest fake GitHub.
+  An offline or no-release run reports and continues; the success path
+  (swap + restart) is covered by unit tests, not by real GitHub.
 
 ## Commands
 
@@ -91,6 +118,14 @@ how engine tests drive the agent. Real runs need a config: model via
 - Engine tests (`internal/agent/engine_test.go`) that run real commands use
   `sh`-compatible commands (Linux); Windows command behavior is covered by
   CI smoke tests, not unit tests.
+- `agent.New` returns `(*Engine, error)` since it assembles the system
+  prompt and may load project instructions: `session.project_instructions`
+  (default true) appends `<root>/AGENTS.md` (else `CLAUDE.md`) to the
+  prompt, and `session.system_prompt_file` overrides it — a missing,
+  oversized or symlinked explicit file aborts startup. The content is
+  advisory only. Engine tests use the `mustNew`/`mustBuild` helpers, which
+  fail on startup errors; note the repo's own AGENTS.md is loaded whenever
+  SimpleAgent runs on this repository.
 - Symlink/junction tests `t.Skip` where symlinks are unavailable; real NTFS
   junction verification is manual (`docs/windows-test-checklist.md`).
 - Session/audit state (`approvals.json`, `audit.jsonl`, `sessions/`) is

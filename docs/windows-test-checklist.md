@@ -82,3 +82,29 @@ Approved commands may reach the network by design — this is documented. To
 verify the harness itself has no egress other than the model endpoint, run
 with `--mock` (server on 127.0.0.1) and inspect with a firewall log or
 `netstat` while the agent works: no connections besides localhost appear.
+
+## 9. `/update` on Windows (requires a published release)
+
+The running binary must be a versioned build (`git describe` tag, e.g. built
+with `make build-windows` on a tag) **older than** the latest published
+release, and the console needs internet access to api.github.com:
+
+- Run `/update` → prints current version vs. the release tag, asks
+  `y/N` at a `y/n>` prompt.
+- Answer `n` (or bare Enter) → "update cancelled.", session continues.
+- Answer `y` → downloads and verifies the SHA-256 against the release's
+  `SHA256SUMS` (a `.simpleagent-update-*` stage file appears next to the
+  .exe and disappears after the swap), prints "installed <tag> (sha256 …)"
+  and "restarting…", then the REPL exits and a fresh harness starts in the
+  same console with the new banner.
+- During the swap the old binary is renamed to `simpleagent.exe.old`. The
+  cleanup runs immediately after the new process spawns, but the old image
+  is still mapped while this process is exiting, so `.old` will typically
+  linger; the next `/update`'s swap clears any stale `.old` first. If the
+  new binary is corrupt, the install is refused and the old binary stays
+  (rollback, nothing else available to check).
+- `.agent\audit.jsonl` gains an `update_applied` event with from/to versions
+  and the sha256.
+- Negative checks: no release newer than the installed version →
+  "already on the latest release"; offline → the fetch fails with a message
+  and the session keeps running.

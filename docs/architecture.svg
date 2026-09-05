@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="980" font-family="DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#555"/>
+    </marker>
+    <marker id="arrowW" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#fff"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1400" height="980" fill="#ffffff"/>
+  <rect x="0" y="0" width="1400" height="44" fill="#24344d"/>
+  <text x="700" y="29" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">SimpleAgent — architecture (LLM output is untrusted; boundaries are enforced in code)</text>
+
+  <!-- ============ left column: human console ============ -->
+  <rect x="30" y="70" width="330" height="330" rx="10" fill="#eef3fb" stroke="#5b7bb4" stroke-width="2"/>
+  <text x="195" y="95" font-size="16" font-weight="bold" fill="#24344d" text-anchor="middle">Human console (Windows 11 / terminal)</text>
+  <text x="195" y="113" font-size="11" fill="#444" text-anchor="middle">internal/repl</text>
+
+  <rect x="50" y="125" width="290" height="58" rx="6" fill="#fff" stroke="#5b7bb4"/>
+  <text x="195" y="146" font-size="13" font-weight="bold" text-anchor="middle">REPL loop</text>
+  <text x="195" y="163" font-size="11" text-anchor="middle">user&gt; prompt · Tab plan/build toggle</text>
+  <text x="195" y="177" font-size="11" text-anchor="middle">/ command menu · arrows · filter · /update</text>
+
+  <rect x="50" y="195" width="290" height="58" rx="6" fill="#fff" stroke="#5b7bb4"/>
+  <text x="195" y="216" font-size="13" font-weight="bold" text-anchor="middle">TextUI · raw console input</text>
+  <text x="195" y="233" font-size="11" text-anchor="middle">termios / SetConsoleMode · echo · keys</text>
+  <text x="195" y="247" font-size="11" text-anchor="middle">streamed model text · command output</text>
+
+  <rect x="50" y="265" width="290" height="58" rx="6" fill="#fff" stroke="#5b7bb4"/>
+  <text x="195" y="286" font-size="13" font-weight="bold" text-anchor="middle">Approval prompts · Ctrl+C</text>
+  <text x="195" y="303" font-size="11" text-anchor="middle">y / a / n · interrupt running turn</text>
+  <text x="195" y="317" font-size="11" text-anchor="middle">session files (.agent/sessions)</text>
+
+  <rect x="50" y="340" width="290" height="44" rx="6" fill="#e8f0fb" stroke="#5b7bb4" stroke-dasharray="4 3"/>
+  <text x="195" y="359" font-size="12" text-anchor="middle">piped input: cooked lines, /mode, no menu</text>
+  <text x="195" y="374" font-size="11" text-anchor="middle">(used by CI smoke tests)</text>
+
+  <!-- ============ middle column: agent engine ============ -->
+  <rect x="410" y="70" width="560" height="330" rx="10" fill="#fdf3e7" stroke="#c98a3d" stroke-width="2"/>
+  <text x="690" y="95" font-size="16" font-weight="bold" fill="#7a4c12" text-anchor="middle">Agent engine · internal/agent</text>
+
+  <rect x="430" y="110" width="240" height="120" rx="6" fill="#fff" stroke="#c98a3d"/>
+  <text x="550" y="131" font-size="13" font-weight="bold" text-anchor="middle">Engine.RunTurn (agent loop)</text>
+  <text x="550" y="149" font-size="11" text-anchor="middle">history kept + trimmed (never orphans tool results)</text>
+  <text x="550" y="163" font-size="11" text-anchor="middle">per-turn tool-call cap · rollback on error</text>
+  <text x="550" y="177" font-size="11" text-anchor="middle">system prompt: rules + project instructions</text>
+  <text x="550" y="191" font-size="11" text-anchor="middle">(AGENTS.md / CLAUDE.md, advisory)</text>
+  <text x="550" y="205" font-size="11" text-anchor="middle">plan mode: mode note + reduced tool list</text>
+  <text x="550" y="219" font-size="11" text-anchor="middle">audit + session log on every event</text>
+
+  <rect x="700" y="110" width="250" height="120" rx="6" fill="#fff" stroke="#c98a3d"/>
+  <text x="825" y="131" font-size="13" font-weight="bold" text-anchor="middle">Tool catalog · tools.go</text>
+  <text x="825" y="150" font-size="11" text-anchor="middle">list_files · read_file · write_file</text>
+  <text x="825" y="164" font-size="11" text-anchor="middle">search_files (sandboxed)</text>
+  <text x="825" y="178" font-size="11" text-anchor="middle">run_command (approval-gated)</text>
+  <text x="825" y="200" font-size="11" fill="#7a4c12" text-anchor="middle">descriptions double as model instructions;</text>
+  <text x="825" y="214" font-size="11" fill="#7a4c12" text-anchor="middle">enforcement lives in the sandbox</text>
+
+  <rect x="430" y="245" width="520" height="70" rx="6" fill="#fff" stroke="#c98a3d"/>
+  <text x="690" y="266" font-size="13" font-weight="bold" text-anchor="middle">Tool dispatch (write_file / run_command gated by mode)</text>
+  <text x="690" y="284" font-size="11" text-anchor="middle">plan mode: write_file blocked · run_command allowlist-only, no prompt</text>
+  <text x="690" y="298" font-size="11" text-anchor="middle">build mode: approval prompt (y / a / n) · denylist always wins</text>
+
+  <rect x="430" y="330" width="520" height="54" rx="6" fill="#fff5ea" stroke="#c98a3d" stroke-dasharray="4 3"/>
+  <text x="690" y="350" font-size="12" text-anchor="middle">mode toggles + blocks audited: mode_switch · plan_block</text>
+  <text x="690" y="368" font-size="11" text-anchor="middle">audit never blocks a turn</text>
+
+  <!-- ============ right column: model client ============ -->
+  <rect x="1020" y="70" width="350" height="330" rx="10" fill="#eefaf0" stroke="#3d9c5e" stroke-width="2"/>
+  <text x="1195" y="95" font-size="16" font-weight="bold" fill="#14532d" text-anchor="middle">Model client · internal/model</text>
+
+  <rect x="1040" y="110" width="310" height="70" rx="6" fill="#fff" stroke="#3d9c5e"/>
+  <text x="1195" y="131" font-size="13" font-weight="bold" text-anchor="middle">Client.Chat — SSE stream parser</text>
+  <text x="1195" y="149" font-size="11" text-anchor="middle">content reassembled chunk by chunk</text>
+  <text x="1195" y="163" font-size="11" text-anchor="middle">tool calls rebuilt by chunk index</text>
+
+  <rect x="1040" y="195" width="310" height="60" rx="6" fill="#fff" stroke="#3d9c5e"/>
+  <text x="1195" y="216" font-size="13" font-weight="bold" text-anchor="middle">OpenAI-compatible wire types</text>
+  <text x="1195" y="233" font-size="11" text-anchor="middle">messages · tool schemas · chunks</text>
+
+  <rect x="1040" y="270" width="310" height="115" rx="6" fill="#fff" stroke="#3d9c5e"/>
+  <text x="1195" y="291" font-size="13" font-weight="bold" text-anchor="middle">Model endpoint (HTTP only)</text>
+  <text x="1195" y="309" font-size="11" text-anchor="middle">POST {base_url}/chat/completions</text>
+  <text x="1195" y="323" font-size="11" text-anchor="middle">key read from env var (never config file)</text>
+  <text x="1195" y="337" font-size="11" text-anchor="middle">local: vLLM · Ollama · LM Studio · llama.cpp</text>
+  <text x="1195" y="351" font-size="11" text-anchor="middle">offline demo: internal/mock scripted server</text>
+  <text x="1195" y="372" font-size="11" fill="#14532d" text-anchor="middle">model-side network path (the other: /update, below)</text>
+
+  <rect x="1040" y="405" width="310" height="34" rx="6" fill="#fff" stroke="#3d9c5e" stroke-dasharray="4 3"/>
+  <text x="1195" y="420" font-size="12" font-weight="bold" text-anchor="middle">internal/update · the other network path</text>
+  <text x="1195" y="434" font-size="11" text-anchor="middle">releases/latest → binary + SHA256SUMS → swap in place</text>
+
+  <!-- arrows: console <-> engine, engine <-> client -->
+  <line x1="360" y1="200" x2="410" y2="180" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="410" y1="230" x2="360" y2="250" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="342" y="225" font-size="11" fill="#333" transform="rotate(-75 342 225)">messages</text>
+  <text x="385" y="225" font-size="11" fill="#333">text + results</text>
+
+  <line x1="990" y1="180" x2="1020" y2="160" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="1020" y1="200" x2="990" y2="220" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="1000" y="180" font-size="11" fill="#333">chat requests</text>
+  <text x="1000" y="212" font-size="11" fill="#333">SSE stream</text>
+
+  <!-- ============ bottom: gates ============ -->
+  <rect x="30" y="440" width="1340" height="255" rx="10" fill="#f7f7fb" stroke="#7c7c9c" stroke-width="2"/>
+  <text x="700" y="468" font-size="16" font-weight="bold" fill="#333" text-anchor="middle">Enforcement layers — internal/sandbox (code, not prompts)</text>
+
+  <rect x="60" y="485" width="400" height="185" rx="6" fill="#fff" stroke="#7c7c9c"/>
+  <text x="260" y="506" font-size="13" font-weight="bold" text-anchor="middle">Path containment — Root.Resolve</text>
+  <text x="260" y="525" font-size="11" text-anchor="middle">every file tool path passes this single gate</text>
+  <text x="260" y="541" font-size="11" text-anchor="middle">.. escapes · Windows device names · ADS</text>
+  <text x="260" y="555" font-size="11" text-anchor="middle">UNC / \\?\ prefixes · case rules per platform</text>
+  <text x="260" y="571" font-size="11" text-anchor="middle">symlink &amp; junction walk (dangling rejected)</text>
+  <text x="260" y="587" font-size="11" text-anchor="middle">.agent and config files protected (Protect)</text>
+  <text x="260" y="611" font-size="11" fill="#5b5b80" text-anchor="middle">file tools: read · list · search · write</text>
+  <text x="260" y="625" font-size="11" fill="#5b5b80" text-anchor="middle">caps: read 1 MB · write 5 MB · list/search capped</text>
+  <text x="260" y="649" font-size="11" fill="#555" text-anchor="middle">+ exec.go: env hygiene (no secrets in children)</text>
+  <text x="260" y="663" font-size="11" fill="#555" text-anchor="middle">output tail cap · timeout · whole-tree kill</text>
+
+  <rect x="500" y="485" width="420" height="185" rx="6" fill="#fff" stroke="#7c7c9c"/>
+  <text x="710" y="506" font-size="13" font-weight="bold" text-anchor="middle">Command gate — approvals + modes</text>
+  <text x="710" y="527" font-size="11" text-anchor="middle">denylist: hard block, wins over everything</text>
+  <text x="710" y="541" font-size="11" text-anchor="middle">allowlist: exact / prefix* · auto-approve</text>
+  <text x="710" y="555" font-size="11" text-anchor="middle">persisted “always” approvals (approvals.json)</text>
+  <text x="710" y="569" font-size="11" text-anchor="middle">plan mode: allowlist-only, no prompt</text>
+  <text x="710" y="583" font-size="11" text-anchor="middle">build mode: y / a / n human approval</text>
+  <text x="710" y="611" font-size="11" fill="#5b5b80" text-anchor="middle">then the shell child runs:</text>
+  <text x="710" y="625" font-size="11" fill="#5b5b80" text-anchor="middle">powershell.exe / sh from project root,</text>
+  <text x="710" y="639" font-size="11" fill="#5b5b80" text-anchor="middle">TEMP/TMP inside .agent, non-interactive,</text>
+  <text x="710" y="653" font-size="11" fill="#5b5b80" text-anchor="middle">output streamed live + capped for the model</text>
+
+  <rect x="960" y="485" width="380" height="185" rx="6" fill="#fff" stroke="#7c7c9c"/>
+  <text x="1150" y="506" font-size="13" font-weight="bold" text-anchor="middle">State &amp; accountability — .agent/</text>
+  <text x="1150" y="527" font-size="11" text-anchor="middle">audit.jsonl: append-only JSONL trail</text>
+  <text x="1150" y="541" font-size="11" text-anchor="middle">(every tool call, approval, block, switch)</text>
+  <text x="1150" y="561" font-size="11" text-anchor="middle">sessions/: one JSONL per conversation</text>
+  <text x="1150" y="575" font-size="11" text-anchor="middle">approvals.json: persisted “always” rules</text>
+  <text x="1150" y="595" font-size="11" text-anchor="middle">config (simpleagent.json / --config):</text>
+  <text x="1150" y="609" font-size="11" text-anchor="middle">defaults → file → env → flags, validated</text>
+  <text x="1150" y="623" font-size="11" text-anchor="middle">at startup (config.Load)</text>
+  <text x="1150" y="647" font-size="11" fill="#5b5b80" text-anchor="middle">.agent and the config file are invisible to</text>
+  <text x="1150" y="661" font-size="11" fill="#5b5b80" text-anchor="middle">the model and refused by Resolve</text>
+
+  <!-- arrows from engine dispatch down to gates -->
+  <line x1="430" y1="340" x2="260" y2="440" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="690" y1="385" x2="710" y2="440" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="950" y1="340" x2="1150" y2="440" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="255" y="430" font-size="11" fill="#333" transform="rotate(-28 255 430)">file tools</text>
+  <text x="700" y="424" font-size="11" fill="#333">commands</text>
+  <text x="1110" y="430" font-size="11" fill="#333" transform="rotate(28 1110 430)">events + state</text>
+
+  <!-- trust footer -->
+  <rect x="30" y="720" width="1340" height="70" rx="10" fill="#fff4f0" stroke="#c0562c" stroke-width="2"/>
+  <text x="700" y="745" font-size="14" font-weight="bold" fill="#7c3412" text-anchor="middle">Trust boundary</text>
+  <text x="700" y="765" font-size="12" fill="#7c3412" text-anchor="middle">The model only ever proposes tool calls. Every file access is contained by Root.Resolve; every shell command is gated by deny → allowlist → prompt (or plan-mode policy).</text>
+  <text x="700" y="782" font-size="12" fill="#7c3412" text-anchor="middle">None of that relies on the model “behaving”: instructions in the system prompt and project files are advisory, and everything is recorded in the audit trail.</text>
+
+  <!-- config file note -->
+  <rect x="30" y="815" width="1340" height="145" rx="10" fill="#f2f2f2" stroke="#999" stroke-width="1.5"/>
+  <text x="700" y="840" font-size="15" font-weight="bold" fill="#333" text-anchor="middle">Startup wiring (cmd/simpleagent/main.go)</text>
+  <text x="700" y="864" font-size="12" fill="#333" text-anchor="middle">flags → config.Load (validate secrets: key only by env var name) → sandbox.NewRoot → protect .agent + config → state dirs</text>
+  <text x="700" y="882" font-size="12" fill="#333" text-anchor="middle">→ audit log → approvals (allowlist + denylist) → model client or built-in mock (--mock) → engine.New (assembles system prompt, may load AGENTS.md/CLAUDE.md)</text>
+  <text x="700" y="900" font-size="12" fill="#333" text-anchor="middle">→ REPL: sessions JSONL, prompt, plan/build Tab toggle, /-command menu, approval prompts, Ctrl+C.</text>
+  <text x="700" y="925" font-size="11" fill="#666" text-anchor="middle">Zero external dependencies · CGO_ENABLED=0 · Windows 11 target, developed and tested on Linux · guided reading order: docs/code-walkthrough.md</text>
+  <text x="700" y="947" font-size="11" fill="#666" text-anchor="middle">threat model and residual risks: docs/security.md</text>
+</svg>

@@ -186,12 +186,13 @@ server etc.).
 | key / command | effect |
 |---|---|
 | plain text     | send a message to the agent (multiline: end a line with `\`) |
-| `/` + arrows  | at an interactive color prompt: command menu — typing after `/` filters, ↑/↓ select, Enter runs, Tab accepts, Esc closes for the line. `/exit` and `/new` only fire on a full match or after arrow selection, so a stray Enter cannot quit or reset |
+| `/` + arrows  | at an interactive color prompt: command menu — typing after `/` filters, ↑/↓ select, Enter runs, Tab accepts, Esc closes for the line. `/exit`, `/new` and `/update` only fire on a full match or after arrow selection, so a stray Enter cannot quit, reset or restart |
 | `y` / `a` / `n` | at an approval prompt: run once / always allow / deny |
 | `Tab`          | at the prompt: toggle plan/build mode (TTY only; discards the half-typed line) |
 | `/approvals`     | show the current allowlist and denylist rules |
 | `/mode`          | show the current mode; `/mode plan` / `/mode build` switch (needed for piped input) |
 | `/new`         | reset conversation (new session file) |
+| `/update`      | check the latest release on GitHub; if newer, confirm, download the platform binary, verify its SHA-256 against the release's `SHA256SUMS`, replace the running binary and restart |
 | `/help`        | this list |
 | `/exit`        | quit |
 | `Ctrl+C`       | interrupt the running turn (again at idle: quit) |

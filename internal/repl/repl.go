@@ -6,33 +6,40 @@ package repl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"simpleagent/internal/agent"
+	"simpleagent/internal/audit"
 	"simpleagent/internal/config"
+	"simpleagent/internal/update"
 )
 
 // REPL runs the interactive loop. sessionFile is the open JSONL file of the
 // current conversation (see openSession); it is attached to the engine as
-// its SessionLog so every message is persisted as it happens.
+// its SessionLog so every message is persisted as it happens. auditLog is
+// the harness audit trail, which /update records its decisions in.
 type REPL struct {
 	cfg         *config.Config
 	ui          *TextUI
 	engine      *agent.Engine
 	stateDir    string
 	sessionFile *os.File
+	auditLog    *audit.Audit
 	version     string
 }
 
 // New creates the REPL and immediately opens a session file for the first
 // conversation.
-func New(cfg *config.Config, ui *TextUI, engine *agent.Engine, stateDir, version string) *REPL {
-	r := &REPL{cfg: cfg, ui: ui, engine: engine, stateDir: stateDir, version: version}
+func New(cfg *config.Config, ui *TextUI, engine *agent.Engine, stateDir, version string, auditLog *audit.Audit) *REPL {
+	r := &REPL{cfg: cfg, ui: ui, engine: engine, stateDir: stateDir, version: version, auditLog: auditLog}
 	r.openSession()
 	return r
 }
@@ -186,20 +193,22 @@ var slashCommands = []slashCommand{
 	{"/new", "clear conversation history (starts a new session file)"},
 	{"/approvals", "show approval rules (allowlist + denylist)"},
 	{"/mode", "show the current mode (plan/build); /mode plan or /mode build switches"},
+	{"/update", "check for a newer release; download, verify and restart"},
 	{"/exit", "quit"},
 }
 
 // slashMenu filters the command table by what the user typed after "/"
 // (case-insensitive prefix match). It drives the interactive menu; an empty
 // result means "no command matches - behave like plain text". Commands that
-// end or reset the session (/exit, /new) are marked confirm so a stray
-// Enter on a partial prefix cannot fire them (see menuEntry in ui.go).
+// end or reset the session (/exit, /new, /update - which restarts) are
+// marked confirm so a stray Enter on a partial prefix cannot fire them (see
+// menuEntry in ui.go).
 func slashMenu(typed string) []menuEntry {
 	prefix := strings.ToLower(typed)
 	var out []menuEntry
 	for _, c := range slashCommands {
 		if strings.HasPrefix(c.line, prefix) {
-			confirm := c.line == "/exit" || c.line == "/new"
+			confirm := c.line == "/exit" || c.line == "/new" || c.line == "/update"
 			out = append(out, menuEntry{line: c.line, confirm: confirm})
 		}
 	}
@@ -263,6 +272,15 @@ func (r *REPL) handleCommand(line string) (bool, error) {
 			}
 		}
 		return false, nil
+	case "/update":
+		// Installing a newer binary ends the session: the process is
+		// restarted, so quit=true means "the REPL should stop running".
+		quit, err := r.handleUpdate()
+		if err != nil {
+			r.ui.Error("update: " + err.Error())
+			return false, nil
+		}
+		return quit, nil
 	case "/exit":
 		return true, nil
 	default:
@@ -296,4 +314,108 @@ func (r *REPL) handleMode(parts []string) {
 	default:
 		r.ui.Error(`usage: /mode [plan|build]  (Tab also toggles the mode)`)
 	}
+}
+
+// handleUpdate implements /update: it checks the hardcoded GitHub repo's
+// latest released version against the running one, and when a newer release
+// exists asks the user, downloads the platform's binary, verifies its
+// SHA-256 against the release's SHA256SUMS, swaps it in for the running
+// executable and spawns a restart before returning quit=true.
+//
+// Every failure is reported to the user and the session continues: only a
+// confirmed, verified, successfully installed update ends the REPL. In mock
+// or offline runs the network check simply fails with a message.
+func (r *REPL) handleUpdate() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	up := update.NewUpdater()
+
+	rel, err := up.LatestRelease(ctx)
+	if err != nil {
+		if errors.Is(err, update.ErrNoRelease) {
+			r.ui.Info("no released versions found to update to.")
+			return false, nil
+		}
+		return false, err
+	}
+	if !update.NewerAvailable(r.version, rel.TagName) {
+		r.ui.Info(fmt.Sprintf("already on the latest release (%s). current: %s", rel.TagName, r.version))
+		return false, nil
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return false, fmt.Errorf("cannot locate the running binary: %w", err)
+	}
+	exe, err = filepath.Abs(exe)
+	if err != nil {
+		return false, fmt.Errorf("cannot resolve the running binary path: %w", err)
+	}
+
+	ok, err := r.confirm(fmt.Sprintf("update %s (%s) to %s?", r.version, runtime.GOOS, rel.TagName))
+	if err != nil {
+		// EOF or a read failure means "no": never fail the session over a
+		// declined update.
+		r.ui.Info("update cancelled.")
+		return false, nil
+	}
+	if !ok {
+		r.ui.Info("update cancelled.")
+		return false, nil
+	}
+
+	// Install stages the download next to the running binary (same
+	// filesystem, so the swap rename is atomic); it is only written after
+	// the checksum has been verified.
+	hexSum, err := up.Install(ctx, rel, runtime.GOOS, exe)
+	if err != nil {
+		return false, err
+	}
+	r.ui.Info(fmt.Sprintf("installed %s (sha256 %s)", rel.TagName, hexSum))
+	_ = r.auditLog.Log("update_applied", map[string]any{
+		"from":   r.version,
+		"to":     rel.TagName,
+		"sha256": hexSum,
+	})
+
+	if err := r.restart(exe); err != nil {
+		// The swap already happened and the binary is executable; keep the
+		// REPL running (a manual /exit relaunches the new version) instead
+		// of silently ending the session.
+		return false, fmt.Errorf("update installed, but restarting failed: %w", err)
+	}
+	r.ui.Info("restarting with the new version...")
+	return true, nil
+}
+
+// confirm asks a yes/no question through the shared input reader, so it
+// works identically on a TTY and on piped input. Bare Enter or any non-"y"
+// answer means no. The prompt is drawn even when stdin is not a terminal so
+// CI and scripting see a matching transcript.
+func (r *REPL) confirm(question string) (bool, error) {
+	r.ui.Info(question + " [y/N]")
+	r.ui.write(r.ui.paint("33", "y/n> "))
+	line, err := r.ui.readSingleLine()
+	if err != nil {
+		return false, err
+	}
+	a := strings.ToLower(strings.TrimSpace(line))
+	return a == "y" || a == "yes", nil
+}
+
+// restart spawns a fresh copy of the (newly replaced) binary with the same
+// arguments and stdio, then returns so the caller can end the REPL and let
+// the old process exit. The child inherits the console, so the session
+// appears to continue seamlessly. On Windows the swapped-away .old image is
+// cleaned up best-effort once the child is running.
+func (r *REPL) restart(exe string) error {
+	child := exec.Command(exe, os.Args[1:]...)
+	child.Stdin = os.Stdin
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	if err := child.Start(); err != nil {
+		return err
+	}
+	update.RemoveOldBinary(exe)
+	return nil
 }

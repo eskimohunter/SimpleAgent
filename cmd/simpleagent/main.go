@@ -167,6 +167,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	r := repl.New(cfg, ui, engine, stateDir, version)
+	r := repl.New(cfg, ui, engine, stateDir, version, auditLog)
 	return r.Run()
 }

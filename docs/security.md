@@ -6,9 +6,12 @@ enforced, how, and what residual risks remain by design.
 ## Threat model
 
 - The model host is on your LAN and is reachable only at the configured
-  `base_url`. The harness makes exactly one kind of network call: POST
-  `{base_url}/chat/completions`. There is no other network code path
-  (no telemetry, no auto-update, no other endpoints).
+  `base_url`. The harness makes exactly one kind of model network call: POST
+  `{base_url}/chat/completions`. The only other network code path is `internal/update`,
+  which the user triggers explicitly with `/update`: it fetches the latest
+  release info from `api.github.com`, then the matching platform binary and its
+  `SHA256SUMS` from GitHub. There is no telemetry, no background auto-update,
+  no other endpoints.
 - The model may try to read sensitive files, write outside the project,
   or run arbitrary commands. All three are constrained:
   1. file tools → **code-enforced containment** (no prompt per op),
@@ -97,6 +100,27 @@ Every file op goes through `sandbox.Root.Resolve` (`internal/sandbox/paths.go`):
 `.agent/audit.jsonl` records every user message, assistant reply, tool call,
 approval decision, and command result (exit code, timing, truncation), all
 timestamped. Contents of files are not logged.
+
+### 3.5 Self-update (`/update`)
+
+The model cannot trigger an update: `/update` is a REPL-only command, run by
+the user. Its network footprint is the one extra code path beyond the model
+endpoint (`internal/update`): it reads the latest release info from
+`api.github.com`, then fetches a binary asset and its `SHA256SUMS` from
+GitHub. The upgrade path is deliberately narrow and verifiable:
+
+- only the asset named for the running OS
+  (`simpleagent-linux-amd64` / `simpleagent-windows-amd64.exe`) is accepted,
+  and only when the release ships a `SHA256SUMS` file — anything else is
+  refused before any file is touched;
+- the download is capped (32 MiB) and checked against the release's own
+  SHA-256 entry *before* it is staged or swapped in;
+- the swap replaces the running executable in place (atomic rename on Unix;
+  the rename-dance through `exe.old` on Windows, with rollback on failure)
+  and the newly installed version shows its real release version at startup;
+- the whole flow is user-confirmed interactively (`y/N`, no = no change) and
+  audited: a successful upgrade writes an `update_applied` event with the
+  from/to versions and the verified SHA-256.
 
 ### 4. Conversation discipline
 

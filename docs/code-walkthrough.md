@@ -42,6 +42,7 @@ internal/repl       interactive console: prompts, streaming, Ctrl+C
 internal/approvals  command gates: allowlist + persisted "always" (auto-approve) and denylist (hard block)
 internal/audit      append-only JSONL event log
 internal/sandbox    the security core: path containment, file tools, exec
+internal/update     /update: GitHub release check, SHA-256 verification, in-place binary swap + restart
 internal/mock       scripted offline model server for --mock
 ```
 
@@ -116,15 +117,15 @@ terminal (`TextUI.Interactive`), the REPL enters raw character mode
 (`enterRawMode` in the `console_*.go` files — termios on Linux,
 `SetConsoleMode` on Windows) and reads keys itself: `ReadUserInteractive`
 (`ui.go:277`) echoes printable keys, handles Backspace, and turns a Tab
-press into the plan/build toggle (`REPL.toggleMode`, `repl.go:148`). It
+press into the plan/build toggle (`REPL.toggleMode`, `repl.go:153`). It
 also owns the command menu: typing `/` lists the built-in commands
-(`slashCommands`, `repl.go:184`) below the input, ↑/↓ move the highlight,
+(`slashCommands`, `repl.go:191`) below the input, ↑/↓ move the highlight,
 Enter executes the selection (returned to the REPL as a normal slash
 line), Tab accepts it into the line and Esc dismisses the menu for the
-rest of the line; typing filters via `slashMenu` (`repl.go:197`).
-`menuEntry.confirm` guards `/exit` and `/new` so a stray Enter on a
-partial prefix submits the draft instead of quitting or resetting. Piped
-input skips raw mode entirely; use `/mode` there.
+rest of the line; typing filters via `slashMenu` (`repl.go:206`).
+`menuEntry.confirm` guards `/exit`, `/new` and `/update` so a stray Enter
+on a partial prefix submits the draft instead of quitting, resetting or
+restarting. Piped input skips raw mode entirely; use `/mode` there.
 
 ### Step 6 — `internal/approvals` and `internal/audit`
 Two small, self-contained packages. Approvals answers "may this command run
@@ -137,6 +138,34 @@ whitespace-normalizing `normalize` (`approvals.go:180`) and the atomic
 tmp+rename save (`approvals.go:213`).
 Audit appends one JSON line per event, flushed immediately so a crash cannot
 lose the trail (`audit.go:42`).
+
+### Step 6.5 — `internal/update` — the `/update` command
+
+The second network path in the program, and the only one that changes the
+harness's own binary. The REPL glue is `REPL.handleUpdate` (`repl.go:328`):
+it compares the running version (Makefile-stamped via `git describe`) with
+the latest GitHub release (`NewerAvailable`, `version.go:74` — numeric
+`vX.Y.Z` compare, suffixes/dev builds never outrank a release), and only a
+user-confirmed newer release proceeds. The mechanics live in this package:
+
+- `github.go` — the hardcoded repo, `LatestRelease` (`github.go:64`) on
+  `api.github.com/.../releases/latest`, and the size-capped `Download`.
+  `FindAsset` accepts exactly the two known asset names plus `SHA256SUMS`;
+  anything else is refused.
+- `checksum.go` — parses the release's `SHA256SUMS` and compares the
+  downloaded binary's digest (a mismatch aborts before anything is
+  installed).
+- `install.go` — `Install` (`install.go:27`) drives the sequence:
+  find assets → download → verify → stage → swap. The stage file is
+  created next to the running binary (same filesystem, so the rename
+  cannot cross devices) and chmod'd to the original's permission bits,
+  because `os.Rename` preserves the source file's mode and would
+  otherwise strip the execute bit.
+- `swap_unix.go` / `swap_windows.go` — platform halves of
+  `replaceExecutable`: an atomic `os.Rename` where the filesystem allows
+  overwriting a running binary, and the `exe → exe.old → new exe` dance with
+  rollback on Windows, whose `RemoveOldBinary` cleanup makes the surface
+  symmetrical.
 
 ### Step 7 — `internal/sandbox` — read this twice
 This is the security core; `docs/security.md` explains the threat model.
