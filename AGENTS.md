@@ -52,9 +52,13 @@ Linux; CI (`.github/workflows/ci.yml`) runs Linux and Windows jobs.
   (`internal/repl/ui_test.go`) and a manual terminal check.
 - `/update` (`internal/update`): the second network code path (after the
   model client), user-triggered only. Hardcoded repo
-  `eskimohunter/SimpleAgent`; `releases/latest` is compared against the
+  `eskimohunter/SimpleAgent`. The newest release is compared against the
   Makefile-stamped version (`internal/update/version.go`, numeric
-  `vX.Y.Z`); only the platform binary asset is accepted and only with the
+  `vX.Y.Z`): `releases/latest` when the repo has a stable release,
+  otherwise the highest-versioned release from the full `/releases` list
+  (prereleases included, drafts skipped — a prerelease-only repo must not
+  make /update report "nothing to update to"). Only the platform binary
+  asset is accepted and only with the
   release's `SHA256SUMS`; install is download → verify SHA-256 → stage
   (next to the binary, same filesystem, chmod'd to the original's mode so
   the rename cannot strip the execute bit) → swap (`swap_unix.go` atomic

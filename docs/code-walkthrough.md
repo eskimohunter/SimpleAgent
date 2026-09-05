@@ -142,16 +142,18 @@ lose the trail (`audit.go:42`).
 ### Step 6.5 — `internal/update` — the `/update` command
 
 The second network path in the program, and the only one that changes the
-harness's own binary. The REPL glue is `REPL.handleUpdate` (`repl.go:328`):
+harness's own binary. The REPL glue is `REPL.handleUpdate` (`repl.go:329`):
 it compares the running version (Makefile-stamped via `git describe`) with
 the latest GitHub release (`NewerAvailable`, `version.go:74` — numeric
 `vX.Y.Z` compare, suffixes/dev builds never outrank a release), and only a
 user-confirmed newer release proceeds. The mechanics live in this package:
 
-- `github.go` — the hardcoded repo, `LatestRelease` (`github.go:64`) on
-  `api.github.com/.../releases/latest`, and the size-capped `Download`.
-  `FindAsset` accepts exactly the two known asset names plus `SHA256SUMS`;
-  anything else is refused.
+- `github.go` — the hardcoded repo, `LatestRelease` (`github.go:71`):
+  `releases/latest` first, and when it 404s (repo has no stable release)
+  the highest-versioned release from the full `/releases` list
+  (prereleases included, drafts skipped). Plus the size-capped
+  `Download`. `FindAsset` accepts exactly the two known asset names plus
+  `SHA256SUMS`; anything else is refused.
 - `checksum.go` — parses the release's `SHA256SUMS` and compares the
   downloaded binary's digest (a mismatch aborts before anything is
   installed).

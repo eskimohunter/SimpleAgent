@@ -106,8 +106,11 @@ timestamped. Contents of files are not logged.
 The model cannot trigger an update: `/update` is a REPL-only command, run by
 the user. Its network footprint is the one extra code path beyond the model
 endpoint (`internal/update`): it reads the latest release info from
-`api.github.com`, then fetches a binary asset and its `SHA256SUMS` from
-GitHub. The upgrade path is deliberately narrow and verifiable:
+`api.github.com` (falling back to the full `/releases` list when the repo
+has no stable release yet — prereleases included, so a pre-release-only
+repo can still be updated), then fetches a binary asset and its
+`SHA256SUMS` from GitHub. The upgrade path is deliberately narrow and
+verifiable:
 
 - only the asset named for the running OS
   (`simpleagent-linux-amd64` / `simpleagent-windows-amd64.exe`) is accepted,

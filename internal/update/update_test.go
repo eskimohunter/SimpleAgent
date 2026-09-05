@@ -100,6 +100,72 @@ func TestLatestReleaseNotFound(t *testing.T) {
 	}
 }
 
+// releaseListServer serves a raw /releases array and always 404s
+// /releases/latest, forcing the prerelease fallback path.
+func releaseListServer(t *testing.T, body string) *Updater {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/releases" {
+			http.NotFound(w, nil)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	u := NewUpdater()
+	u.repo = srv.URL
+	return u
+}
+
+func TestLatestReleaseFallsBackToPrerelease(t *testing.T) {
+	up := releaseListServer(t, `[
+		{"tag_name":"v0.0.3","draft":false,"assets":[
+			{"name":"simpleagent-linux-amd64","browser_download_url":"https://example.invalid/b"},
+			{"name":"SHA256SUMS","browser_download_url":"https://example.invalid/s"}
+		]}
+	]`)
+	rel, err := up.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel.TagName != "v0.0.3" {
+		t.Errorf("tag = %q; want v0.0.3 (prerelease fallback)", rel.TagName)
+	}
+}
+
+func TestLatestReleasePicksHighest(t *testing.T) {
+	up := releaseListServer(t, `[
+		{"tag_name":"v0.0.2","draft":false},
+		{"tag_name":"v0.0.9","draft":false},
+		{"tag_name":"v9.9.9","draft":true},
+		{"tag_name":"v0.0.3","draft":false}
+	]`)
+	rel, err := up.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel.TagName != "v0.0.9" {
+		t.Errorf("tag = %q; want v0.0.9 (highest non-draft, draft 9.9.9 skipped)", rel.TagName)
+	}
+}
+
+func TestLatestReleasePicksHighestUnparseableTags(t *testing.T) {
+	up := releaseListServer(t, `[
+		{"tag_name":"latest-stuff","draft":false},
+		{"tag_name":"v0.0.3","draft":false}
+	]`)
+	rel, err := up.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "latest-stuff" does not parse as a version (Atoi on "latest"), so
+	// v0.0.3 wins even though it appears later in the list.
+	if rel.TagName != "v0.0.3" {
+		t.Errorf("tag = %q; want v0.0.3", rel.TagName)
+	}
+}
+
 func TestFindAsset(t *testing.T) {
 	rs := newReleaseServer(t, "v0.2.0")
 	rel, err := testUpdater(rs).LatestRelease(context.Background())
