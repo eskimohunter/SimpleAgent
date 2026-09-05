@@ -42,7 +42,7 @@ type UI interface {
 type Mode int
 
 const (
-	ModeBuild Mode = iota // default: full file + command access
+	ModeBuild Mode = iota // full file + command access
 	ModePlan              // read-only: no file writes, only allowlisted commands
 )
 
@@ -89,7 +89,9 @@ type Engine struct {
 	tempDir  string
 }
 
-// Mode returns the current working mode (ModeBuild by default).
+// Mode returns the current working mode. The engine starts in plan mode;
+// the user switches to build mode explicitly (Tab at the prompt or
+// /mode build).
 func (e *Engine) Mode() Mode {
 	return e.mode
 }
@@ -124,6 +126,7 @@ func New(cfg config.Config, client *model.Client, sbx *sandbox.Sandbox, allow *a
 		MaxMessages:         cfg.Session.MaxMessages,
 		MaxToolCallsPerTurn: cfg.Session.MaxToolCallsPerTurn,
 		cfg:                 cfg,
+		mode:                ModePlan, // sessions start read-only in plan mode
 		tempDir:             filepath.Join(sbx.Root().Abs(), ".agent", "tmp"),
 	}
 	prompt := buildSystemPrompt(cfg.Root)
@@ -297,8 +300,8 @@ Rules:
 - Keep replies concise and concrete. Mention exact file paths when referring to files.
 
 Modes:
-- Build mode (default): you may modify files and run approved commands.
-- Plan mode: read-only investigation. write_file and run_command are disabled and will NOT run even if requested; a mode note is appended to every request while it is active. Produce a concrete plan and wait for the user to switch to build mode (Tab at the prompt, or /mode build).
+- Plan mode (default): read-only investigation. write_file and run_command are disabled and will NOT run even if requested; a mode note is appended to every request while it is active. Produce a concrete plan and wait for the user to switch to build mode (Tab at the prompt, or /mode build).
+- Build mode: you may modify files and run approved commands.
 Today's date: %s`, osName, root, shellName, time.Now().Format("2006-01-02 15:04")) + "\n"
 }
 

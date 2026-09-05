@@ -139,13 +139,13 @@ func (r *REPL) Run() error {
 	}
 }
 
-// prompt returns the painted prompt for the current mode: green "user> " in
+// prompt returns the painted prompt for the current mode: blue "build> " in
 // build mode, yellow "plan> " in plan mode.
 func (r *REPL) prompt() string {
 	if r.engine.Mode() == agent.ModePlan {
 		return r.ui.paint("1;33", "plan> ")
 	}
-	return r.ui.paint("1;32", "user> ")
+	return r.ui.paint("1;34", "build> ")
 }
 
 // toggleMode flips plan/build mode and tells the user what changed.
@@ -171,9 +171,9 @@ func (r *REPL) banner() {
 	r.ui.Info(fmt.Sprintf("  model        : %s", ep))
 	r.ui.Info(fmt.Sprintf("  state        : %s", r.stateDir))
 	if r.ui.Interactive() {
-		r.ui.Info("  mode         : build (Tab toggles plan mode)")
+		r.ui.Info("  mode         : plan (Tab toggles build mode)")
 	} else {
-		r.ui.Info("  mode         : build (/mode toggles plan mode)")
+		r.ui.Info("  mode         : plan (/mode toggles build mode)")
 	}
 	r.ui.Info("  shell commands need your approval. type /help for commands.")
 }

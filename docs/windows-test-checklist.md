@@ -13,9 +13,13 @@ simpleagent.exe --mock --root C:\tmp\agent-test
 Expected:
 - banner shows project root and "mock (built-in demo server)"
 - a `.agent` directory appears inside the project root
-- the demo agent lists files, then asks to run a command
+- the banner says the session starts in **plan mode** (`mode : plan ...`)
+- the demo agent lists files, then tries to run a command — in plan mode it
+  is refused without a prompt
 
-Answer `y` → command output streams live, agent finishes. `/exit` quits.
+Then switch to build mode (`/mode build`, or Tab on a real console) and ask
+again: the approval prompt appears. Answer `y` → command output streams
+live, agent finishes. `/exit` quits.
 
 ## 2. UTF-8 / console
 

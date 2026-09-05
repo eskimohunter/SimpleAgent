@@ -45,7 +45,9 @@ jobs:
         shell: bash
         run: |
           d=$(mktemp -d)
-          printf 'hello agent world\na\n/exit\n' | ./bin/simpleagent --mock --root "$d" > smoke.log 2>&1
+          # Sessions start in plan mode; switch to build so the mock's
+          # approval-gated command demo runs (and /mode is exercised).
+          printf '/mode build\nhello agent world\na\n/exit\n' | ./bin/simpleagent --mock --root "$d" > smoke.log 2>&1
           grep -q 'Hello from mock agent' smoke.log
           grep -q 'echo Hello from mock agent' "$d/.agent/approvals.json"
           test -s "$d/.agent/audit.jsonl"
@@ -71,7 +73,9 @@ jobs:
         shell: bash
         run: |
           d=$(mktemp -d)
-          printf 'hello agent world\na\n/exit\n' | ./bin/simpleagent.exe --mock --root "$d" > smoke.log 2>&1
+          # Sessions start in plan mode; switch to build so the mock's
+          # approval-gated command demo runs (and /mode is exercised).
+          printf '/mode build\nhello agent world\na\n/exit\n' | ./bin/simpleagent.exe --mock --root "$d" > smoke.log 2>&1
           grep -q 'Hello from mock agent' smoke.log
           grep -q 'echo Hello from mock agent' "$d/.agent/approvals.json"
           test -s "$d/.agent/audit.jsonl"

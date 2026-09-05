@@ -7,7 +7,7 @@ an audit trail, and never touches the internet except for the model endpoint
 you configure on your LAN.
 
 ```
-user> find the failing test in this project and fix it
+build> find the failing test in this project and fix it
   ...the agent lists/reads/search files (confined to the project dir)...
 $ go test ./...
 approve command? [y]es once / [a]lways / [n]o
@@ -86,6 +86,8 @@ simpleagent.exe --mock --root C:\path\to\your\project
 (same on Linux: `./simpleagent --mock --root /path/to/project`) —
 `--mock` runs a built-in scripted model server on 127.0.0.1, useful to verify
 the harness works before you point it at a real model. No API key needed.
+Sessions start in plan mode (read-only); switch to build mode with Tab or
+`/mode build` to see the full demo, including the command approval prompt.
 
 ## Configuration
 
@@ -200,11 +202,11 @@ server etc.).
 ## Modes: plan and build
 
 Press **Tab** at the prompt (or use `/mode`) to switch between two working
-modes; the prompt shows which one is active (`user>` = build, `plan>` =
-plan). The mode is enforced in code, not just suggested, and survives `/new`
-for the rest of the session:
+modes; the prompt shows which one is active (`build>` = build, `plan>` =
+plan). Sessions start in **plan mode** (read-only). The mode is enforced in
+code, not just suggested, and survives `/new` for the rest of the session:
 
-| | build mode (default) | plan mode |
+| | build mode | plan mode (default) |
 |---|---|---|
 | `read_file` / `list_files` / `search_files` | yes | yes |
 | `write_file` | yes | **blocked** — the agent is told to plan, not edit |
@@ -214,7 +216,7 @@ In plan mode the harness hides `write_file` and `run_command` from the
 model's tool list and refuses them at dispatch anyway; a per-request note
 reminds the model of the mode. The denylist is checked before the mode in
 both modes. Use plan mode to let the agent investigate and propose a
-concrete plan, then Tab back to build mode to execute it.
+concrete plan, then Tab (or `/mode build`) to execute it.
 
 ## Agent capabilities
 

@@ -114,6 +114,7 @@ func TestEndToEndTools(t *testing.T) {
 		}
 	}
 	eng, ui, sbx := testEngine(t, brain, false)
+	eng.SetMode(ModeBuild)
 	sum, err := eng.RunTurn(context.Background(), "create a file")
 	if err != nil {
 		t.Fatal(err)
@@ -147,6 +148,7 @@ func TestCommandApprovalFlow(t *testing.T) {
 		}
 	}
 	eng, ui, _ := testEngine(t, brain, false)
+	eng.SetMode(ModeBuild)
 	sum, err := eng.RunTurn(context.Background(), "run a command")
 	if err != nil {
 		t.Fatal(err)
@@ -173,6 +175,7 @@ func TestCommandDeniedRecovers(t *testing.T) {
 		}
 	}
 	eng, ui, _ := testEngine(t, brain, true)
+	eng.SetMode(ModeBuild)
 	sum, err := eng.RunTurn(context.Background(), "do something risky")
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +215,7 @@ func TestAutoAllowFromAllowlistSkipsPrompt(t *testing.T) {
 	ui := &fakeUI{}
 	client := model.NewClient(cfg.Model.BaseURL, "", false, 30*time.Second)
 	eng := mustNew(t, cfg, client, sbx, allow, auditLog, ui, "s")
+	eng.SetMode(ModeBuild)
 	eng.MaxToolCallsPerTurn = 3
 	sum, err := eng.RunTurn(context.Background(), "check git status")
 	if err != nil {
@@ -648,6 +652,15 @@ func TestSystemPromptUnreadableAGENTSFallsBackToCLAUDE(t *testing.T) {
 	}
 	if strings.Contains(sys, "UNREADABLE-MARKER") {
 		t.Fatal("unreadable AGENTS.md content must not be injected")
+	}
+}
+
+func TestStartsInPlanMode(t *testing.T) {
+	eng, _, _ := testEngine(t, func(msgs []model.Message) model.Reply {
+		return model.Reply{Content: "ok."}
+	}, false)
+	if got := eng.Mode(); got != ModePlan {
+		t.Fatalf("fresh engine mode = %s; want plan", got)
 	}
 }
 

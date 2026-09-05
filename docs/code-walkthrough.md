@@ -96,14 +96,15 @@ subtle part of the whole project.
     (falling back to `CLAUDE.md`). Files are capped at 64 KiB and the
     content is advisory only — enforcement stays in code;
   - the plan/build `Mode` (`engine.go:42`, `Mode()`/`SetMode()`
-    `engine.go:93`) — plan mode blocks `write_file` in `dispatchTool`
-    (`engine.go:474`) and gates `run_command` in `runCommandTool`
-    (`engine.go:595`); the request loop hides write_file/run_command from
+    `engine.go:95/101`) — every session **starts in plan mode** (`New`,
+    `engine.go:118`); plan mode blocks `write_file` in `dispatchTool`
+    (`engine.go:481`) and gates `run_command` in `runCommandTool`
+    (`engine.go:602`); the request loop hides write_file/run_command from
     the advertised tools (`toolsForMode` in tools.go) and appends an
     ephemeral mode note;
-  - `trimmedSlice` (`engine.go:328`) — history is capped for the model
+  - `trimmedSlice` (`engine.go:331`) — history is capped for the model
     context, but never in a way that orphans tool results;
-  - `runCommandTool` (`engine.go:595`) — the approval gate in action;
+  - `runCommandTool` (`engine.go:602`) — the approval gate in action;
   - `dispatchTool`/`runFileTool` — argument decoding and routing.
 
 ### Step 5 — `internal/repl/repl.go` and `ui.go`

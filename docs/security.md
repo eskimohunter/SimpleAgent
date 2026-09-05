@@ -82,8 +82,9 @@ Every file op goes through `sandbox.Root.Resolve` (`internal/sandbox/paths.go`):
   `Invoke-WebRequest`/`Invoke-RestMethod`, `nc`, `ssh`, ...) so project
   files cannot be sent off the machine through an approved shell command;
   the built-in defaults ship an empty denylist — enable it deliberately.
-- **Plan/build modes are enforced, not advisory.** In plan mode (Tab at the
-  prompt, or `/mode plan`) the engine refuses `write_file` at dispatch and
+- **Plan/build modes are enforced, not advisory.** Sessions start in plan
+  mode (read-only); switch to build with Tab at the prompt, or `/mode
+  build`. In plan mode the engine refuses `write_file` at dispatch and
   runs `run_command` only when the command matches the allowlist — never a
   prompt — because "changes system state" is undecidable for arbitrary
   shells and the allowlist is the user's own curated rule set. The denylist
