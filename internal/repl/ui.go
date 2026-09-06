@@ -201,6 +201,22 @@ func (u *TextUI) ApproveCommand(ctx context.Context, cmd string) (approvals.Deci
 	}
 }
 
+// swapConsoleInput temporarily replaces u.in with the platform's translated
+// console-key stream while raw input is active, and returns a function that
+// restores the original reader. On Unix nothing changes (newConsoleInput
+// returns nil); on Windows the raw console shares no record translator with
+// the ordinary byte reader (see the console_windows.go package comment), so
+// every raw-mode read must come from the KEY_EVENT stream.
+func (u *TextUI) swapConsoleInput() func() {
+	r, err := newConsoleInput()
+	if err != nil || r == nil {
+		return func() {}
+	}
+	old := u.in
+	u.in = bufio.NewReader(r)
+	return func() { u.in = old }
+}
+
 // readPrompt reads one short answer from the user (approval and confirm
 // prompts). On a real terminal it switches to raw mode and echoes keys
 // itself, so the read works regardless of the terminal's line discipline:
@@ -230,6 +246,8 @@ func (u *TextUI) readPrompt(prompt string) (string, error) {
 		return u.readSingleLine()
 	}
 	defer restore()
+	restoreIn := u.swapConsoleInput()
+	defer restoreIn()
 	u.write(prompt)
 	var sb strings.Builder
 	for {
@@ -370,6 +388,8 @@ func (u *TextUI) ReadUserInteractive(prompt func() string, onTab func(), menu fu
 		return u.ReadUserLine()
 	}
 	defer restore()
+	restoreIn := u.swapConsoleInput()
+	defer restoreIn()
 	return u.readRawLines(prompt, onTab, menu)
 }
 

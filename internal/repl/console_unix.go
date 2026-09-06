@@ -9,12 +9,20 @@
 package repl
 
 import (
+	"io"
 	"os"
 	"syscall"
 	"unsafe"
 )
 
 func configureConsole() {}
+
+// newConsoleInput reports that there is no separate console-key stream on
+// Unix: terminals already deliver UTF-8 text and VT sequences on stdin, so
+// the raw-mode reader keeps reading u.in as-is.
+func newConsoleInput() (io.Reader, error) {
+	return nil, nil
+}
 
 // enterRawMode switches stdin's terminal from canonical (line) mode to
 // character mode: echo off, line buffering off, signal generation off and
