@@ -360,9 +360,13 @@ func (u *TextUI) ReadUserInteractive(prompt func() string, onTab func(), menu fu
 	u.FinishStream()
 	restore, err := enterRawMode()
 	if err != nil {
-		// Raw input unavailable (unsupported platform, not a console):
-		// degrade to the cooked reader on a fresh line.
+		// Raw input unavailable (unsupported platform, degraded console):
+		// degrade to the cooked reader on a fresh line. The prompt must be
+		// drawn here - the cooked reader never draws one, and on Windows a
+		// "failed" raw-mode setup can still have applied raw mode (no echo),
+		// so the user needs the prompt text up front.
 		fmt.Fprintln(u.out)
+		u.write(prompt())
 		return u.ReadUserLine()
 	}
 	defer restore()

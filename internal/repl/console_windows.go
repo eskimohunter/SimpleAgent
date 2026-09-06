@@ -78,8 +78,15 @@ func enterRawMode() (func(), error) {
 		return nil, errors.New("GetConsoleMode failed")
 	}
 	raw := old &^ (enableProcessedInput | enableLineInput | enableEchoInput)
-	if _, _, err := procSetMode.Call(h, uintptr(raw)); err != nil {
-		return nil, err
+	// Check the BOOL return value, not the last-error value: Win32 APIs
+	// leave GetLastError() stale on success, so testing the err slot of
+	// SyscallN would report failure (and take the cooked fallback) even
+	// though the mode was applied - leaving the console raw with echo
+	// off and no UI drawing a prompt. Same pattern as GetConsoleMode
+	// above.
+	ret, _, _ := procSetMode.Call(h, uintptr(raw))
+	if ret == 0 {
+		return nil, errors.New("SetConsoleMode failed")
 	}
 	return func() {
 		_, _, _ = procSetMode.Call(h, uintptr(old))
